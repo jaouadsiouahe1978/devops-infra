@@ -1,0 +1,114 @@
+name: devops-elk
+
+networks:
+  elk:
+    driver: bridge
+    name: devops-elk
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
+    container_name: elasticsearch
+    restart: unless-stopped
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    environment:
+      - node.name=elasticsearch
+      - cluster.name=devops-cluster
+      - discovery.type=single-node
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-DevOps2024!ES}
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=false
+      - xpack.license.self_generated.type=basic
+      - ES_JAVA_OPTS=${ES_JAVA_OPTS:--Xms512m -Xmx512m}
+      - bootstrap.memory_lock=false
+      - "indices.memory.index_buffer_size=20%"
+    volumes:
+      - ${DATA_ROOT:-~/devops-infra/data}/elasticsearch:/usr/share/elasticsearch/data
+    networks:
+      - elk
+    mem_limit: 1g
+    cpus: 1.0
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -u elastic:${ELASTIC_PASSWORD:-DevOps2024!ES} http://localhost:9200/_cluster/health | grep -qv red"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.13.0
+    container_name: kibana
+    restart: unless-stopped
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - ELASTICSEARCH_USERNAME=kibana_system
+      - ELASTICSEARCH_PASSWORD=${ELASTIC_PASSWORD:-DevOps2024!ES}
+      - SERVER_NAME=kibana
+      - SERVER_HOST=0.0.0.0
+      - XPACK_SECURITY_ENCRYPTIONKEY=something_at_least_32_characters_long
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=another_32_chars_key_here_please
+    volumes:
+      - ${DATA_ROOT:-~/devops-infra/data}/kibana:/usr/share/kibana/data
+    networks:
+      - elk
+    mem_limit: 1g
+    cpus: 0.5
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-s", "http://localhost:5601/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.13.0
+    container_name: logstash
+    restart: unless-stopped
+    ports:
+      - "5044:5044"   # Beats input
+      - "5000:5000"   # Syslog input
+      - "5001:5001"   # JSON TCP input
+    environment:
+      - LS_JAVA_OPTS=${LS_JAVA_OPTS:--Xms256m -Xmx256m}
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-DevOps2024!ES}
+      - XPACK_MONITORING_ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - XPACK_MONITORING_ENABLED=true
+    volumes:
+      - ${HOME}/devops-infra/monitoring/logstash/logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro
+      - ${DATA_ROOT:-~/devops-infra/data}/logstash:/usr/share/logstash/data
+    networks:
+      - elk
+    mem_limit: 768m
+    cpus: 0.5
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-s", "http://localhost:9600/_node/stats"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

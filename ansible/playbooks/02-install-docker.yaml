@@ -1,0 +1,163 @@
+---
+- name: Install Docker CE and Docker Compose
+  hosts: localhost
+  become: true
+  gather_facts: true
+  tags: [docker, install]
+
+  vars:
+    docker_user: "{{ lookup('env', 'USER') }}"
+    docker_data_root: "{{ lookup('env', 'HOME') }}/devops-infra/data/docker"
+    docker_log_max_size: "10m"
+    docker_log_max_file: "3"
+
+  tasks:
+    - name: Remove old Docker versions
+      apt:
+        name:
+          - docker
+          - docker-engine
+          - docker.io
+          - containerd
+          - runc
+          - docker-compose
+        state: absent
+      failed_when: false
+      tags: [cleanup]
+
+    - name: Install Docker prerequisites
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+        state: present
+        update_cache: true
+
+    - name: Create Docker GPG key directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Add Docker official GPG key
+      get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: '0644'
+      register: docker_gpg
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: >
+          deb [arch={{ ansible_architecture | replace('x86_64', 'amd64') }}
+          signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/ubuntu
+          {{ ansible_distribution_release }} stable
+        state: present
+        filename: docker
+        update_cache: true
+
+    - name: Install Docker CE
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+      notify: Restart Docker
+
+    - name: Create Docker data directory
+      file:
+        path: "{{ docker_data_root }}"
+        state: directory
+        owner: root
+        group: docker
+        mode: '0711'
+
+    - name: Configure Docker daemon
+      copy:
+        dest: /etc/docker/daemon.json
+        mode: '0644'
+        content: |
+          {
+            "data-root": "{{ docker_data_root }}",
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "{{ docker_log_max_size }}",
+              "max-file": "{{ docker_log_max_file }}"
+            },
+            "storage-driver": "overlay2",
+            "default-address-pools": [
+              {"base": "172.20.0.0/16", "size": 24}
+            ],
+            "features": {
+              "buildkit": true
+            },
+            "metrics-addr": "0.0.0.0:9323",
+            "experimental": false,
+            "live-restore": true
+          }
+      notify: Restart Docker
+
+    - name: Add user to docker group
+      user:
+        name: "{{ docker_user }}"
+        groups: docker
+        append: true
+      register: docker_group
+
+    - name: Enable and start Docker service
+      systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Enable Docker socket
+      systemd:
+        name: docker.socket
+        enabled: true
+        state: started
+
+    - name: Create Docker network for infrastructure
+      community.docker.docker_network:
+        name: devops-network
+        driver: bridge
+        ipam_config:
+          - subnet: '172.20.0.0/24'
+            gateway: '172.20.0.1'
+      become: false
+      ignore_errors: true
+
+    - name: Verify Docker installation
+      command: docker --version
+      register: docker_version
+      changed_when: false
+      become: false
+
+    - name: Verify Docker Compose installation
+      command: docker compose version
+      register: compose_version
+      changed_when: false
+      become: false
+
+  handlers:
+    - name: Restart Docker
+      systemd:
+        name: docker
+        state: restarted
+        daemon_reload: true
+
+  post_tasks:
+    - name: Docker installation summary
+      debug:
+        msg:
+          - "Docker: {{ docker_version.stdout }}"
+          - "Docker Compose: {{ compose_version.stdout }}"
+          - "Data root: {{ docker_data_root }}"
+          - "NOTE: Log out and back in to use Docker without sudo (group: docker)"

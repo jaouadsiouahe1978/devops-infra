@@ -1,0 +1,31 @@
+version: "3.8"
+
+services:
+  leaky-app:
+    image: python:3.11-alpine
+    container_name: incident-memory-leak
+    mem_limit: 256m
+    memswap_limit: 256m
+    command: >
+      python3 -c "
+      import time, sys
+      print('[INCIDENT-03] Memory leak simulation started')
+      leak = []
+      i = 0
+      while True:
+          leak.append(' ' * 1024 * 1024)
+          i += 1
+          print(f'[LEAK] Allocated {i}MB total', flush=True)
+          time.sleep(0.5)
+      "
+
+  monitor:
+    image: alpine:latest
+    container_name: incident-mem-monitor
+    command: >
+      sh -c "
+        while true; do
+          echo '[MONITOR]' \$(date) - checking memory...;
+          sleep 5;
+        done
+      "

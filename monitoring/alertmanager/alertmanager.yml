@@ -1,0 +1,106 @@
+global:
+  resolve_timeout: 5m
+  smtp_from: 'alertmanager@localhost'
+  smtp_smarthost: 'localhost:25'
+
+# Inhibition rules prevent child alerts firing when parent is already firing
+inhibit_rules:
+  # If a node is down, don't alert for all services on that node
+  - source_matchers:
+      - alertname="NodeDown"
+    target_matchers:
+      - severity="warning"
+    equal: ['instance']
+  # If entire cluster down, don't alert individual pods
+  - source_matchers:
+      - alertname="KubernetesAPIServerDown"
+    target_matchers:
+      - severity=~"warning|critical"
+
+# Templates
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+route:
+  group_by: ['alertname', 'cluster', 'service', 'severity']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 12h
+  receiver: 'default-webhook'
+
+  routes:
+    # Critical alerts - immediate notification
+    - matchers:
+        - severity="critical"
+      receiver: 'critical-webhook'
+      group_wait: 10s
+      repeat_interval: 1h
+      continue: true
+
+    # Warnings - batched
+    - matchers:
+        - severity="warning"
+      receiver: 'warning-webhook'
+      group_wait: 5m
+      repeat_interval: 6h
+
+    # Database alerts - dedicated receiver
+    - matchers:
+        - service=~"postgres|mysql|redis|mongodb"
+      receiver: 'database-webhook'
+      group_wait: 1m
+
+    # K8s alerts
+    - matchers:
+        - alertname=~"Pod.*|Deployment.*|Node.*"
+      receiver: 'k8s-webhook'
+      group_wait: 2m
+
+    # Backup failures - immediate
+    - matchers:
+        - alertname="BackupJobFailed"
+      receiver: 'critical-webhook'
+      group_wait: 0s
+
+    # Deadman switch
+    - matchers:
+        - alertname="DeadMansSwitch"
+      receiver: 'deadman-webhook'
+      group_wait: 0s
+      repeat_interval: 1m
+
+receivers:
+  - name: 'default-webhook'
+    webhook_configs:
+      - url: 'http://localhost:5001/webhook/alerts'
+        send_resolved: true
+        http_config:
+          timeout: 10s
+
+  - name: 'critical-webhook'
+    webhook_configs:
+      - url: 'http://localhost:5001/webhook/critical'
+        send_resolved: true
+    # Also log to file
+    # file_configs:
+    #   - filename: /var/log/alertmanager/critical.log
+
+  - name: 'warning-webhook'
+    webhook_configs:
+      - url: 'http://localhost:5001/webhook/warnings'
+        send_resolved: true
+
+  - name: 'database-webhook'
+    webhook_configs:
+      - url: 'http://localhost:5001/webhook/database'
+        send_resolved: true
+
+  - name: 'k8s-webhook'
+    webhook_configs:
+      - url: 'http://localhost:5001/webhook/kubernetes'
+        send_resolved: true
+
+  - name: 'deadman-webhook'
+    webhook_configs:
+      - url: 'http://localhost:5001/webhook/deadman'
+        send_resolved: false

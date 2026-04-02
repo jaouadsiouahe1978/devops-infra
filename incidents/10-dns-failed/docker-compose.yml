@@ -1,0 +1,34 @@
+version: "3.8"
+
+services:
+  app-dns-test:
+    image: alpine:latest
+    container_name: incident-dns-failed
+    dns:
+      - 1.2.3.4
+    command: >
+      sh -c "
+        apk add -q curl bind-tools 2>/dev/null;
+        echo '[INCIDENT-10] Testing DNS resolution with broken DNS server...';
+        echo '[DNS] Trying to resolve google.com via 1.2.3.4...';
+        nslookup google.com 2>&1 || echo '[ERROR] DNS resolution failed!';
+        echo '[DNS] Trying curl...';
+        curl --max-time 5 http://google.com/ 2>&1 | head -3 || echo '[ERROR] Cannot reach host - DNS failure!';
+        echo '[DIAGNOSIS] Check DNS configuration:';
+        cat /etc/resolv.conf;
+        sleep infinity
+      "
+
+  app-dns-ok:
+    image: alpine:latest
+    container_name: incident-dns-working
+    dns:
+      - 8.8.8.8
+    command: >
+      sh -c "
+        apk add -q bind-tools 2>/dev/null;
+        echo '[REFERENCE] Testing DNS with working server 8.8.8.8...';
+        nslookup google.com 8.8.8.8 2>&1 | head -5;
+        echo '[OK] DNS working correctly';
+        sleep infinity
+      "

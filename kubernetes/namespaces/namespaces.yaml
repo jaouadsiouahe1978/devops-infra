@@ -1,0 +1,120 @@
+# =============================================================================
+# namespaces.yaml — All namespaces for the DevOps/SRE learning infrastructure
+# Apply with: kubectl apply -f kubernetes/namespaces/namespaces.yaml
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Infrastructure / Platform namespaces
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    name: monitoring
+    managed-by: devops-infra
+    environment: platform
+    team: sre
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: databases
+  labels:
+    name: databases
+    managed-by: devops-infra
+    environment: platform
+    team: sre
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cicd
+  labels:
+    name: cicd
+    managed-by: devops-infra
+    environment: platform
+    team: devops
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: security
+  labels:
+    name: security
+    managed-by: devops-infra
+    environment: platform
+    team: sre
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: messaging
+  labels:
+    name: messaging
+    managed-by: devops-infra
+    environment: platform
+    team: sre
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: storage
+  labels:
+    name: storage
+    managed-by: devops-infra
+    environment: platform
+    team: sre
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: elk
+  labels:
+    name: elk
+    managed-by: devops-infra
+    environment: platform
+    team: sre
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: networking
+  labels:
+    name: networking
+    managed-by: devops-infra
+    environment: platform
+    team: sre
+---
+# ---------------------------------------------------------------------------
+# Application environment namespaces
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: development
+  labels:
+    name: development
+    managed-by: devops-infra
+    environment: development
+    team: dev
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: staging
+  labels:
+    name: staging
+    managed-by: devops-infra
+    environment: staging
+    team: devops
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+  labels:
+    name: production
+    managed-by: devops-infra
+    environment: production
+    team: sre

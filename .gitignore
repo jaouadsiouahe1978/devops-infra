@@ -1,0 +1,19 @@
+# Secrets
+.env
+*.key
+*.pem
+secrets/
+
+# Data volumes
+data/
+logs/
+*.log
+
+# Terraform state
+*.tfstate
+*.tfstate.backup
+.terraform/
+
+# OS
+.DS_Store
+Thumbs.db

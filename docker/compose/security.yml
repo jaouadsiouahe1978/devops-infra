@@ -1,0 +1,83 @@
+name: devops-security
+
+networks:
+  security:
+    driver: bridge
+    name: devops-security
+
+services:
+  vault:
+    image: hashicorp/vault:1.15
+    container_name: vault
+    restart: "no"
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_DEV_ROOT_TOKEN_ID:-dev-root-token}
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+      VAULT_ADDR: http://0.0.0.0:8200
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - ${DATA_ROOT:-~/devops-infra/data}/vault:/vault/data
+    networks:
+      - security
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  consul:
+    image: hashicorp/consul:1.17
+    container_name: consul
+    restart: "no"
+    ports:
+      - "8500:8500"
+      - "8600:8600/udp"
+    command: agent -dev -ui -client=0.0.0.0
+    volumes:
+      - ${DATA_ROOT:-~/devops-infra/data}/consul:/consul/data
+    networks:
+      - security
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "consul", "members"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:23.0
+    container_name: keycloak
+    restart: "no"
+    ports:
+      - "8085:8080"
+    command: start-dev
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-DevOps2024!KC}
+      KC_DB: dev-file
+    volumes:
+      - ${DATA_ROOT:-~/devops-infra/data}/keycloak:/opt/keycloak/data
+    networks:
+      - security
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

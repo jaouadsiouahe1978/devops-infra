@@ -1,0 +1,36 @@
+version: "3.8"
+
+services:
+  tls-drop-server:
+    image: alpine:latest
+    container_name: incident-tls-drop
+    ports:
+      - "18444:4433"
+    command: >
+      sh -c "
+        apk add -q ncat openssl 2>/dev/null || apk add -q netcat-openbsd openssl;
+        echo '[INCIDENT-11] Starting TLS drop server on :4433';
+        echo '[SERVER] Will accept TCP but drop TLS handshake packets...';
+        while true; do
+          nc -l -p 4433 -e sh -c 'echo [DROP] Connection received, dropping TLS handshake; sleep 60' 2>/dev/null || \
+          nc -l 4433 < /dev/null;
+        done
+      "
+
+  tls-client:
+    image: alpine:latest
+    container_name: incident-tls-client
+    depends_on:
+      - tls-drop-server
+    command: >
+      sh -c "
+        apk add -q openssl curl 2>/dev/null;
+        sleep 3;
+        echo '[CLIENT] Attempting TLS handshake to drop server...';
+        while true; do
+          echo '[CLIENT] Connecting...';
+          timeout 5 openssl s_client -connect tls-drop-server:4433 -verify_return_error 2>&1 | head -5 || \
+            echo '[TIMEOUT] TLS handshake timed out after 5s';
+          sleep 10;
+        done
+      "

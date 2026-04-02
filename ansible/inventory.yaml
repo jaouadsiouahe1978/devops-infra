@@ -1,0 +1,81 @@
+---
+all:
+  hosts:
+    localhost:
+      ansible_connection: local
+      ansible_python_interpreter: /usr/bin/python3
+      ansible_user: "{{ lookup('env', 'USER') }}"
+  vars:
+    infra_dir: "{{ lookup('env', 'HOME') }}/devops-infra"
+    data_dir: "{{ infra_dir }}/data"
+    logs_dir: "{{ infra_dir }}/logs"
+    backup_dir: "{{ infra_dir }}/backups"
+    compose_dir: "{{ infra_dir }}/docker"
+    scripts_dir: "{{ infra_dir }}/scripts"
+
+  children:
+    databases:
+      hosts:
+        localhost:
+      vars:
+        postgres_port: 5432
+        mysql_port: 3306
+        redis_port: 6379
+        mongodb_port: 27017
+
+    monitoring:
+      hosts:
+        localhost:
+      vars:
+        prometheus_port: 9090
+        grafana_port: 3000
+        alertmanager_port: 9093
+        node_exporter_port: 9100
+
+    elk:
+      hosts:
+        localhost:
+      vars:
+        elasticsearch_port: 9200
+        kibana_port: 5601
+        logstash_port: 5044
+
+    cicd:
+      hosts:
+        localhost:
+      vars:
+        jenkins_port: 8081
+        gitlab_port: 8082
+        argocd_port: 8083
+
+    security:
+      hosts:
+        localhost:
+      vars:
+        vault_port: 8200
+        consul_port: 8500
+        keycloak_port: 8085
+
+    messaging:
+      hosts:
+        localhost:
+      vars:
+        kafka_port: 9092
+        rabbitmq_amqp_port: 5672
+        rabbitmq_mgmt_port: 15672
+
+    storage:
+      hosts:
+        localhost:
+      vars:
+        minio_api_port: 9001
+        minio_console_port: 9002
+        nexus_port: 8084
+        registry_port: 5000
+
+    kubernetes:
+      hosts:
+        localhost:
+      vars:
+        k3s_port: 6443
+        kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/config"

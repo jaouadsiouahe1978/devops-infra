@@ -1,0 +1,64 @@
+version: "3.8"
+
+services:
+  leader-node-1:
+    image: python:3.11-alpine
+    container_name: incident-leader-1
+    environment:
+      NODE_ID: "node-1"
+    command: >
+      python3 -c "
+      import time, os, random
+      node_id = os.environ.get('NODE_ID', 'node-1')
+      print(f'[{node_id}] Starting leader election simulation...', flush=True)
+      time.sleep(random.uniform(1, 3))
+      print(f'[{node_id}] Campaigning for leader...', flush=True)
+      time.sleep(2)
+      print(f'[{node_id}] ELECTED AS LEADER', flush=True)
+      i = 0
+      while True:
+          i += 1
+          print(f'[{node_id}] Leading... heartbeat #{i}', flush=True)
+          if i == 5:
+              print(f'[{node_id}] LEADER CRASH SIMULATED!', flush=True)
+              break
+          time.sleep(2)
+      print(f'[{node_id}] Leader down — triggering re-election', flush=True)
+      time.sleep(999)
+      "
+
+  leader-node-2:
+    image: python:3.11-alpine
+    container_name: incident-leader-2
+    environment:
+      NODE_ID: "node-2"
+    command: >
+      python3 -c "
+      import time, os, random
+      node_id = os.environ.get('NODE_ID', 'node-2')
+      print(f'[{node_id}] Starting as follower...', flush=True)
+      time.sleep(12)
+      print(f'[{node_id}] Leader heartbeat timeout — starting election!', flush=True)
+      time.sleep(1)
+      print(f'[{node_id}] NEW LEADER ELECTED: {node_id}', flush=True)
+      i = 0
+      while True:
+          i += 1
+          print(f'[{node_id}] Leading... heartbeat #{i}', flush=True)
+          time.sleep(3)
+      "
+
+  leader-node-3:
+    image: python:3.11-alpine
+    container_name: incident-leader-3
+    environment:
+      NODE_ID: "node-3"
+    command: >
+      python3 -c "
+      import time, os
+      node_id = os.environ.get('NODE_ID', 'node-3')
+      print(f'[{node_id}] Starting as follower...', flush=True)
+      while True:
+          print(f'[{node_id}] Follower — watching leader...', flush=True)
+          time.sleep(5)
+      "

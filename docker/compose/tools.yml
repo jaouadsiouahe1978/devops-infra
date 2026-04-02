@@ -1,0 +1,154 @@
+name: devops-tools
+
+networks:
+  devops-tools:
+    driver: bridge
+    name: devops-tools
+
+volumes:
+  portainer_data:
+  redisinsight_data:
+  pgadmin_data:
+
+services:
+  portainer:
+    image: portainer/portainer-ce:2.19.4
+    container_name: portainer
+    restart: "no"
+    ports:
+      - "9443:9443"
+      - "9000:9000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    networks:
+      - devops-tools
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "--no-check-certificate", "https://localhost:9443/api/system/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redisinsight:
+    image: redis/redisinsight:2.44
+    container_name: redisinsight
+    restart: "no"
+    ports:
+      - "8001:5540"
+    volumes:
+      - redisinsight_data:/data
+    networks:
+      - devops-tools
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5540/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  pgadmin:
+    image: dpage/pgadmin4:8.3
+    container_name: pgadmin
+    restart: "no"
+    ports:
+      - "5050:80"
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@devops.local
+      - PGADMIN_DEFAULT_PASSWORD=DevOps2024!
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - devops-tools
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80/misc/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.1
+    container_name: kafka-ui
+    restart: "no"
+    ports:
+      - "8089:8080"
+    environment:
+      - KAFKA_CLUSTERS_0_NAME=local
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9092
+    networks:
+      - devops-tools
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  apache:
+    image: httpd:2.4-alpine
+    container_name: apache
+    restart: "no"
+    ports:
+      - "8092:80"
+    volumes:
+      - ${HOME}/devops-infra/data/apache/htdocs:/usr/local/apache2/htdocs
+    networks:
+      - devops-tools
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  adminer:
+    image: adminer:4.8.1
+    container_name: adminer
+    restart: "no"
+    ports:
+      - "8093:8080"
+    networks:
+      - devops-tools
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

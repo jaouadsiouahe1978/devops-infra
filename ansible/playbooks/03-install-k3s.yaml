@@ -1,0 +1,178 @@
+---
+- name: Install K3s Kubernetes
+  hosts: localhost
+  become: true
+  gather_facts: true
+  tags: [k3s, kubernetes, install]
+
+  vars:
+    k3s_version: "v1.29.3+k3s1"
+    k3s_user: "{{ lookup('env', 'USER') }}"
+    k3s_home: "{{ lookup('env', 'HOME') }}"
+    kubeconfig_path: "{{ k3s_home }}/.kube/config"
+    k3s_extra_args: >
+      --write-kubeconfig-mode 644
+      --disable traefik
+      --disable servicelb
+      --node-name localhost
+      --advertise-address 127.0.0.1
+      --node-ip 127.0.0.1
+      --cluster-cidr 10.42.0.0/16
+      --service-cidr 10.43.0.0/16
+      --kube-apiserver-arg=feature-gates=TTLAfterFinished=true
+
+  tasks:
+    - name: Check if K3s is already installed
+      stat:
+        path: /usr/local/bin/k3s
+      register: k3s_binary
+
+    - name: Download K3s install script
+      get_url:
+        url: https://get.k3s.io
+        dest: /tmp/k3s-install.sh
+        mode: '0755'
+      when: not k3s_binary.stat.exists
+
+    - name: Install K3s
+      command: /tmp/k3s-install.sh
+      environment:
+        INSTALL_K3S_VERSION: "{{ k3s_version }}"
+        INSTALL_K3S_EXEC: "{{ k3s_extra_args }}"
+        K3S_KUBECONFIG_MODE: "644"
+      when: not k3s_binary.stat.exists
+      notify: Wait for K3s to be ready
+
+    - name: Ensure K3s service is enabled and running
+      systemd:
+        name: k3s
+        enabled: true
+        state: started
+
+    - name: Create .kube directory for user
+      file:
+        path: "{{ k3s_home }}/.kube"
+        state: directory
+        owner: "{{ k3s_user }}"
+        mode: '0755'
+
+    - name: Copy kubeconfig for user
+      copy:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: "{{ kubeconfig_path }}"
+        owner: "{{ k3s_user }}"
+        mode: '0600'
+        remote_src: true
+
+    - name: Update kubeconfig server address
+      replace:
+        path: "{{ kubeconfig_path }}"
+        regexp: 'https://127\.0\.0\.1:6443'
+        replace: 'https://localhost:6443'
+
+    - name: Set KUBECONFIG environment variable
+      lineinfile:
+        path: "{{ k3s_home }}/.bashrc"
+        line: "export KUBECONFIG={{ kubeconfig_path }}"
+        state: present
+
+    - name: Install kubectx and kubens
+      block:
+        - name: Install kubectx
+          get_url:
+            url: https://github.com/ahmetb/kubectx/releases/latest/download/kubectx
+            dest: /usr/local/bin/kubectx
+            mode: '0755'
+
+        - name: Install kubens
+          get_url:
+            url: https://github.com/ahmetb/kubectx/releases/latest/download/kubens
+            dest: /usr/local/bin/kubens
+            mode: '0755'
+      ignore_errors: true
+
+    - name: Install k9s
+      block:
+        - name: Download k9s
+          get_url:
+            url: https://github.com/derailed/k9s/releases/latest/download/k9s_Linux_amd64.tar.gz
+            dest: /tmp/k9s.tar.gz
+
+        - name: Extract k9s
+          unarchive:
+            src: /tmp/k9s.tar.gz
+            dest: /usr/local/bin/
+            include:
+              - k9s
+            remote_src: true
+      ignore_errors: true
+
+    - name: Wait for K3s API to be ready
+      wait_for:
+        port: 6443
+        host: localhost
+        timeout: 120
+        state: started
+
+    - name: Verify K3s cluster is healthy
+      command: kubectl cluster-info
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: cluster_info
+      changed_when: false
+      become: false
+      retries: 5
+      delay: 10
+      until: cluster_info.rc == 0
+
+    - name: Create infrastructure namespaces
+      command: >
+        kubectl create namespace {{ item }} --dry-run=client -o yaml |
+        kubectl apply -f -
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop:
+        - production
+        - staging
+        - monitoring
+        - cicd
+        - security
+        - databases
+        - messaging
+        - storage
+      become: false
+      changed_when: false
+
+    - name: Label namespaces
+      command: >
+        kubectl label namespace {{ item.ns }}
+        kubernetes.io/metadata.name={{ item.ns }}
+        environment={{ item.env }}
+        --overwrite
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop:
+        - {ns: production, env: production}
+        - {ns: staging, env: staging}
+        - {ns: monitoring, env: monitoring}
+        - {ns: cicd, env: cicd}
+        - {ns: security, env: security}
+        - {ns: databases, env: databases}
+        - {ns: messaging, env: messaging}
+        - {ns: storage, env: storage}
+      become: false
+      changed_when: false
+
+  handlers:
+    - name: Wait for K3s to be ready
+      pause:
+        seconds: 15
+
+  post_tasks:
+    - name: K3s installation summary
+      debug:
+        msg:
+          - "K3s installed: {{ k3s_version }}"
+          - "Kubeconfig: {{ kubeconfig_path }}"
+          - "API server: https://localhost:6443"
+          - "Cluster info: {{ cluster_info.stdout_lines[0] | default('checking...') }}"

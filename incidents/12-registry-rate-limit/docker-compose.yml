@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  rate-limit-simulator:
+    image: alpine:latest
+    container_name: incident-registry-ratelimit
+    command: >
+      sh -c "
+        apk add -q curl jq 2>/dev/null;
+        echo '[INCIDENT-12] Simulating Docker Hub rate limit scenario';
+        echo '';
+        echo '[INFO] Docker Hub limits: 100 pulls/6h (anonymous), 200 pulls/6h (free account)';
+        echo '';
+
+        # Check current Docker Hub rate limit status
+        echo '[CHECK] Fetching Docker Hub rate limit headers...';
+        TOKEN=\$(curl -s 'https://auth.docker.io/token?service=registry.docker.io&scope=repository:ratelimitpreview/test:pull' | jq -r .token 2>/dev/null || echo '');
+
+        if [ -n \"\$TOKEN\" ]; then
+          curl -s --head -H \"Authorization: Bearer \$TOKEN\" \
+            https://registry-1.docker.io/v2/ratelimitpreview/test/manifests/latest 2>&1 | \
+            grep -i 'ratelimit' || echo '[RATE LIMIT HEADERS] RateLimit-Limit, RateLimit-Remaining';
+        else
+          echo '[SIMULATE] 429 Too Many Requests - pull rate limit reached';
+          echo 'error: toomanyrequests: You have reached your pull rate limit.';
+          echo 'You may increase the limit by authenticating and upgrading: https://www.docker.com/increase-rate-limit';
+        fi;
+
+        echo '';
+        echo '[SOLUTION] Use a local registry mirror or authenticate';
+        sleep infinity
+      "

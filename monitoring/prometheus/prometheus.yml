@@ -1,0 +1,352 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'local-devops'
+    environment: 'development'
+    datacenter: 'wsl2-local'
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - localhost:9093
+      timeout: 10s
+
+rule_files:
+  - /etc/prometheus/rules/alerts.yml
+  - /etc/prometheus/rules/recording.yml
+
+# =============================================================================
+# SCRAPE CONFIGURATIONS (50+ targets)
+# =============================================================================
+scrape_configs:
+
+  # --------------------------------------------------------------------------
+  # PROMETHEUS SELF-MONITORING
+  # --------------------------------------------------------------------------
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          service: prometheus
+          tier: monitoring
+
+  # --------------------------------------------------------------------------
+  # SYSTEM METRICS
+  # --------------------------------------------------------------------------
+  - job_name: node-exporter
+    static_configs:
+      - targets: ['localhost:9100']
+        labels:
+          service: node-exporter
+          tier: infrastructure
+
+  - job_name: cadvisor
+    static_configs:
+      - targets: ['localhost:8088']
+        labels:
+          service: cadvisor
+          tier: infrastructure
+    metric_relabel_configs:
+      - source_labels: [container_label_com_docker_compose_service]
+        target_label: service
+      - source_labels: [container_label_com_docker_compose_project]
+        target_label: project
+
+  # --------------------------------------------------------------------------
+  # ALERTMANAGER
+  # --------------------------------------------------------------------------
+  - job_name: alertmanager
+    static_configs:
+      - targets: ['localhost:9093']
+        labels:
+          service: alertmanager
+          tier: monitoring
+
+  # --------------------------------------------------------------------------
+  # DATABASES
+  # --------------------------------------------------------------------------
+  - job_name: postgres-exporter
+    static_configs:
+      - targets: ['localhost:9187']
+        labels:
+          service: postgres
+          tier: database
+
+  - job_name: mysql-exporter
+    static_configs:
+      - targets: ['localhost:9104']
+        labels:
+          service: mysql
+          tier: database
+
+  - job_name: redis-exporter
+    static_configs:
+      - targets: ['localhost:9121']
+        labels:
+          service: redis
+          tier: database
+
+  - job_name: mongodb-exporter
+    static_configs:
+      - targets: ['localhost:9216']
+        labels:
+          service: mongodb
+          tier: database
+
+  # --------------------------------------------------------------------------
+  # MESSAGING
+  # --------------------------------------------------------------------------
+  - job_name: kafka-exporter
+    static_configs:
+      - targets: ['localhost:9308']
+        labels:
+          service: kafka
+          tier: messaging
+
+  - job_name: rabbitmq
+    static_configs:
+      - targets: ['localhost:15692']
+        labels:
+          service: rabbitmq
+          tier: messaging
+    metrics_path: /metrics
+
+  # --------------------------------------------------------------------------
+  # SEARCH / LOGS
+  # --------------------------------------------------------------------------
+  - job_name: elasticsearch-exporter
+    static_configs:
+      - targets: ['localhost:9114']
+        labels:
+          service: elasticsearch
+          tier: logging
+
+  # --------------------------------------------------------------------------
+  # SECURITY INFRASTRUCTURE
+  # --------------------------------------------------------------------------
+  - job_name: consul
+    static_configs:
+      - targets: ['localhost:8500']
+        labels:
+          service: consul
+          tier: security
+    metrics_path: /v1/agent/metrics
+    params:
+      format: ['prometheus']
+
+  - job_name: vault
+    static_configs:
+      - targets: ['localhost:8200']
+        labels:
+          service: vault
+          tier: security
+    metrics_path: /v1/sys/metrics
+    params:
+      format: ['prometheus']
+    bearer_token: 'dev-root-token'
+
+  # --------------------------------------------------------------------------
+  # CI/CD
+  # --------------------------------------------------------------------------
+  - job_name: jenkins
+    static_configs:
+      - targets: ['localhost:8081']
+        labels:
+          service: jenkins
+          tier: cicd
+    metrics_path: /prometheus/
+    honor_labels: true
+
+  - job_name: gitlab
+    static_configs:
+      - targets: ['localhost:8082']
+        labels:
+          service: gitlab
+          tier: cicd
+    metrics_path: /-/metrics
+    params:
+      token: ['REPLACE_WITH_GITLAB_TOKEN']
+
+  # --------------------------------------------------------------------------
+  # INGRESS / LOAD BALANCERS
+  # --------------------------------------------------------------------------
+  - job_name: nginx-exporter
+    static_configs:
+      - targets: ['localhost:9113']
+        labels:
+          service: nginx
+          tier: ingress
+
+  - job_name: traefik
+    static_configs:
+      - targets: ['localhost:8082']
+        labels:
+          service: traefik
+          tier: ingress
+    metrics_path: /metrics
+
+  # --------------------------------------------------------------------------
+  # STORAGE
+  # --------------------------------------------------------------------------
+  - job_name: minio
+    static_configs:
+      - targets: ['localhost:9001']
+        labels:
+          service: minio
+          tier: storage
+    metrics_path: /minio/v2/metrics/cluster
+    scheme: http
+
+  - job_name: nexus
+    static_configs:
+      - targets: ['localhost:8084']
+        labels:
+          service: nexus
+          tier: storage
+    metrics_path: /service/metrics/prometheus
+
+  # --------------------------------------------------------------------------
+  # KUBERNETES
+  # --------------------------------------------------------------------------
+  - job_name: kubernetes-apiservers
+    kubernetes_sd_configs:
+      - role: endpoints
+        api_server: https://localhost:6443
+        tls_config:
+          insecure_skip_verify: true
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: default;kubernetes;https
+
+  - job_name: kubernetes-nodes
+    kubernetes_sd_configs:
+      - role: node
+        api_server: https://localhost:6443
+        tls_config:
+          insecure_skip_verify: true
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+      - target_label: __address__
+        replacement: localhost:6443
+      - source_labels: [__meta_kubernetes_node_name]
+        regex: (.+)
+        target_label: __metrics_path__
+        replacement: /api/v1/nodes/${1}/proxy/metrics
+
+  - job_name: kubernetes-cadvisor
+    kubernetes_sd_configs:
+      - role: node
+        api_server: https://localhost:6443
+        tls_config:
+          insecure_skip_verify: true
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+      - target_label: __address__
+        replacement: localhost:6443
+      - source_labels: [__meta_kubernetes_node_name]
+        regex: (.+)
+        target_label: __metrics_path__
+        replacement: /api/v1/nodes/${1}/proxy/metrics/cadvisor
+
+  - job_name: kubernetes-pods
+    kubernetes_sd_configs:
+      - role: pod
+        api_server: https://localhost:6443
+        tls_config:
+          insecure_skip_verify: true
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_pod_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: kubernetes_namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: kubernetes_pod_name
+
+  - job_name: kubernetes-services
+    kubernetes_sd_configs:
+      - role: service
+        api_server: https://localhost:6443
+        tls_config:
+          insecure_skip_verify: true
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"
+      - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__address__, __meta_kubernetes_service_annotation_prometheus_io_port]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_service_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: kubernetes_namespace
+      - source_labels: [__meta_kubernetes_service_name]
+        action: replace
+        target_label: kubernetes_service_name
+
+  # --------------------------------------------------------------------------
+  # BLACKBOX EXPORTER (HTTP probes)
+  # --------------------------------------------------------------------------
+  - job_name: blackbox-http
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - http://localhost:3000/api/health    # Grafana
+          - http://localhost:9090/-/healthy     # Prometheus
+          - http://localhost:9093/-/healthy     # Alertmanager
+          - http://localhost:5601/api/status    # Kibana
+          - http://localhost:8200/v1/sys/health # Vault
+          - http://localhost:8500/v1/agent/self # Consul
+          - http://localhost:9001/minio/health/live # MinIO
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: localhost:9115

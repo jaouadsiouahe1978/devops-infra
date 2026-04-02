@@ -1,0 +1,37 @@
+version: "3.8"
+
+services:
+  disk-filler:
+    image: alpine:latest
+    container_name: incident-disk-full
+    volumes:
+      - disk-data:/data
+    command: >
+      sh -c "
+        echo '[INCIDENT-02] Simulating disk fill...';
+        dd if=/dev/zero of=/data/bigfile bs=1M count=512;
+        echo '[ALERT] Disk usage critical!';
+        df -h /data;
+        sleep infinity
+      "
+
+  monitor:
+    image: alpine:latest
+    container_name: incident-disk-monitor
+    volumes:
+      - disk-data:/data:ro
+    command: >
+      sh -c "
+        while true; do
+          USAGE=\$(df /data | awk 'NR==2{print \$5}');
+          echo \"[MONITOR] Disk usage: \$USAGE\";
+          sleep 10;
+        done
+      "
+
+volumes:
+  disk-data:
+    driver_opts:
+      o: size=600m
+      type: tmpfs
+      device: tmpfs

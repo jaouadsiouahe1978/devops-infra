@@ -1,0 +1,42 @@
+version: "3.8"
+
+services:
+  node-drain-simulator:
+    image: alpine:latest
+    container_name: incident-node-drain
+    command: >
+      sh -c "
+        echo '[INCIDENT-19] Node Cordon and Drain Simulation';
+        echo '=============================================';
+        echo '';
+        echo '[STEP 1] Current cluster state:';
+        echo 'NAME       STATUS   ROLES    AGE   VERSION';
+        echo 'node-1     Ready    master   30d   v1.28.0';
+        echo 'node-2     Ready    worker   30d   v1.28.0';
+        echo 'node-3     Ready    worker   30d   v1.28.0';
+        echo '';
+        echo '[STEP 2] Cordoning node-2 (mark unschedulable)...';
+        echo '> kubectl cordon node-2';
+        sleep 2;
+        echo 'node/node-2 cordoned';
+        echo '';
+        echo '[STEP 3] Draining node-2...';
+        echo '> kubectl drain node-2 --ignore-daemonsets --delete-emptydir-data';
+        sleep 2;
+        echo 'node/node-2 already cordoned';
+        echo 'evicting pod default/app-deployment-abc123';
+        echo 'evicting pod default/app-deployment-def456';
+        echo 'pod/app-deployment-abc123 evicted';
+        echo 'pod/app-deployment-def456 evicted';
+        echo 'node/node-2 drained';
+        echo '';
+        echo '[STEP 4] Pods rescheduled on node-1 and node-3';
+        echo '[STEP 5] Perform maintenance on node-2...';
+        sleep 3;
+        echo '[STEP 6] Uncordoning node-2 (maintenance done)...';
+        echo '> kubectl uncordon node-2';
+        echo 'node/node-2 uncordoned';
+        echo '';
+        echo '[DONE] node-2 back in rotation';
+        sleep infinity
+      "

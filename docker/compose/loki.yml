@@ -1,0 +1,49 @@
+name: devops-loki
+
+networks:
+  monitoring:
+    external: true
+    name: devops-monitoring
+
+services:
+  loki:
+    image: grafana/loki:2.9.4
+    container_name: loki
+    restart: "no"
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/loki.yaml
+    volumes:
+      - ${INFRA_DIR:-~/devops-infra}/monitoring/loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - ${DATA_ROOT:-~/devops-infra/data}/loki:/loki
+    networks:
+      - monitoring
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3100/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  promtail:
+    image: grafana/promtail:2.9.4
+    container_name: promtail
+    restart: "no"
+    ports:
+      - "9080:9080"
+    command: -config.file=/etc/promtail/promtail.yaml
+    volumes:
+      - ${INFRA_DIR:-~/devops-infra}/monitoring/promtail/promtail.yaml:/etc/promtail/promtail.yaml:ro
+      - /var/log:/var/log:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${INFRA_DIR:-~/devops-infra}/logs:/infra/logs:ro
+    networks:
+      - monitoring
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

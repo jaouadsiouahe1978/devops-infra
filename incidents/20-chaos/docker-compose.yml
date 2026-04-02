@@ -1,0 +1,60 @@
+version: "3.8"
+
+services:
+  target-app:
+    image: nginx:alpine
+    container_name: incident-chaos-target
+    ports:
+      - "18084:80"
+
+  chaos-engine:
+    image: alpine:latest
+    container_name: incident-chaos-engine
+    depends_on:
+      - target-app
+    command: >
+      sh -c "
+        apk add -q curl 2>/dev/null;
+        sleep 2;
+        echo '========================================';
+        echo '[CHAOS] Chaos Engineering Test — Starting';
+        echo '========================================';
+        echo '';
+
+        # Test 1: Network stress
+        echo '[CHAOS-1] CPU spike simulation (30s)...';
+        timeout 5 sh -c 'while true; do :; done' || true;
+        echo '[CHAOS-1] CPU spike complete';
+        echo '';
+
+        # Test 2: Service availability check
+        echo '[CHAOS-2] Checking service resilience...';
+        for i in 1 2 3 4 5; do
+          STATUS=\$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://target-app/ 2>/dev/null);
+          echo \"[CHAOS-2] Check \$i/5: HTTP \$STATUS\";
+          sleep 1;
+        done;
+        echo '';
+
+        # Test 3: Memory pressure
+        echo '[CHAOS-3] Memory pressure test...';
+        python3 -c \"
+        import time
+        data = []
+        for i in range(20):
+            data.append('x' * 1024 * 1024)
+        print('[CHAOS-3] 20MB allocated')
+        del data
+        print('[CHAOS-3] Memory released — GC working')
+        \" 2>/dev/null || echo '[CHAOS-3] Python not available — skipping';
+        echo '';
+
+        # Test 4: Kill and restart target
+        echo '[CHAOS-4] Simulating pod kill...';
+        echo '[CHAOS-4] In K8s: kubectl delete pod <pod> && watch kubectl get pods';
+        echo '[CHAOS-4] Expected: pod restarts automatically within 30s';
+        echo '';
+
+        echo '[CHAOS] All tests complete — check system resilience report';
+        sleep infinity
+      "

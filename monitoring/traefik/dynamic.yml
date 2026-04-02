@@ -1,0 +1,111 @@
+## Traefik Dynamic Configuration
+## Routes for all DevOps services
+
+http:
+  routers:
+    grafana:
+      rule: "PathPrefix(`/grafana`)"
+      service: grafana
+      entryPoints:
+        - web
+    prometheus:
+      rule: "PathPrefix(`/prometheus`)"
+      service: prometheus
+      entryPoints:
+        - web
+    kibana:
+      rule: "PathPrefix(`/kibana`)"
+      service: kibana
+      entryPoints:
+        - web
+    jenkins:
+      rule: "PathPrefix(`/jenkins`)"
+      service: jenkins
+      entryPoints:
+        - web
+    argocd:
+      rule: "PathPrefix(`/argocd`)"
+      service: argocd
+      entryPoints:
+        - web
+    vault:
+      rule: "PathPrefix(`/vault`)"
+      service: vault
+      entryPoints:
+        - web
+    consul:
+      rule: "PathPrefix(`/consul`)"
+      service: consul
+      entryPoints:
+        - web
+    minio:
+      rule: "PathPrefix(`/minio`)"
+      service: minio
+      entryPoints:
+        - web
+    sonarqube:
+      rule: "PathPrefix(`/sonar`)"
+      service: sonarqube
+      entryPoints:
+        - web
+    alertmanager:
+      rule: "PathPrefix(`/alertmanager`)"
+      service: alertmanager
+      entryPoints:
+        - web
+
+  services:
+    grafana:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:3000"
+    prometheus:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:9090"
+    kibana:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:5601"
+    jenkins:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:8081"
+    argocd:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:8083"
+    vault:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:8200"
+    consul:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:8500"
+    minio:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:9002"
+    sonarqube:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:9000"
+    alertmanager:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:9093"
+
+  middlewares:
+    strip-grafana:
+      stripPrefix:
+        prefixes:
+          - "/grafana"
+    basic-auth:
+      basicAuth:
+        users:
+          - "admin:$apr1$XXXXXXXX$XXXXXXXXXXXXXXXXXXXXXXXX"
+    rate-limit:
+      rateLimit:
+        average: 100
+        burst: 50

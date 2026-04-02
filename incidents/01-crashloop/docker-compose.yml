@@ -1,0 +1,22 @@
+version: "3.8"
+
+services:
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: devops
+      POSTGRES_PASSWORD: DevOps2024!
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "devops"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  app-backend:
+    image: busybox:latest
+    command: sh -c "echo 'DB ready, app starting OK' && while true; do echo OK; sleep 30; done"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure

@@ -1,0 +1,59 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: incident-db-deadlock-pg
+    environment:
+      POSTGRES_USER: devops
+      POSTGRES_PASSWORD: DevOps2024!
+      POSTGRES_DB: incident_db
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "devops"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  deadlock-tx1:
+    image: postgres:15-alpine
+    container_name: incident-deadlock-tx1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      sh -c "
+        sleep 2;
+        echo '[TX1] Starting transaction 1';
+        psql postgresql://devops:DevOps2024!@postgres/incident_db -c \"
+          CREATE TABLE IF NOT EXISTS accounts (id INT PRIMARY KEY, balance INT);
+          INSERT INTO accounts VALUES (1,1000),(2,2000) ON CONFLICT DO NOTHING;
+        \";
+        psql postgresql://devops:DevOps2024!@postgres/incident_db -c \"
+          BEGIN;
+          UPDATE accounts SET balance=balance-100 WHERE id=1;
+          SELECT pg_sleep(3);
+          UPDATE accounts SET balance=balance+100 WHERE id=2;
+          COMMIT;
+        \";
+        echo '[TX1] Done'
+      "
+
+  deadlock-tx2:
+    image: postgres:15-alpine
+    container_name: incident-deadlock-tx2
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      sh -c "
+        sleep 3;
+        echo '[TX2] Starting transaction 2 (will deadlock)';
+        psql postgresql://devops:DevOps2024!@postgres/incident_db -c \"
+          BEGIN;
+          UPDATE accounts SET balance=balance-100 WHERE id=2;
+          SELECT pg_sleep(3);
+          UPDATE accounts SET balance=balance+100 WHERE id=1;
+          COMMIT;
+        \" || echo '[DEADLOCK DETECTED] PostgreSQL killed one transaction';
+        echo '[TX2] Done'
+      "

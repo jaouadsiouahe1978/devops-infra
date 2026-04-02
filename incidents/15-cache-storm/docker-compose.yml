@@ -1,0 +1,51 @@
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: incident-cache-redis
+    command: redis-server --maxmemory 64mb --maxmemory-policy allkeys-lru
+    ports:
+      - "16379:6379"
+
+  cache-loader:
+    image: redis:7-alpine
+    container_name: incident-cache-loader
+    depends_on:
+      - redis
+    command: >
+      sh -c "
+        sleep 2;
+        echo '[SETUP] Loading cache with 1000 keys (TTL=5s)...';
+        for i in \$(seq 1 1000); do
+          redis-cli -h redis SET key:\$i value:\$i EX 5 > /dev/null;
+        done;
+        echo '[CACHE] All keys loaded. They expire in 5 seconds.';
+        echo '[WAIT] Waiting for mass expiry...';
+        sleep 6;
+        echo '[STORM] All 1000 keys expired simultaneously!';
+        echo '[STORM] Cache invalidation storm — all requests hitting database!';
+        sleep infinity
+      "
+
+  backend-db:
+    image: alpine:latest
+    container_name: incident-cache-backend
+    command: >
+      sh -c "
+        sleep 3;
+        echo '[DB] Backend database starting...';
+        i=0;
+        while true; do
+          i=\$((i+1));
+          KEYS=\$(redis-cli -h redis DBSIZE 2>/dev/null || echo 0);
+          if [ \"\$KEYS\" = '0' ]; then
+            echo \"[DB OVERLOAD] \$i: Cache empty! All \$(( i * 10 )) requests hitting database directly!\";
+          else
+            echo \"[DB OK] \$i: Cache has \$KEYS keys — database load normal\";
+          fi;
+          sleep 2;
+        done
+      "
+    depends_on:
+      - redis

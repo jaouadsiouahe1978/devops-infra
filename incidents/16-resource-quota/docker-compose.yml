@@ -1,0 +1,33 @@
+version: "3.8"
+
+services:
+  quota-exceeded-app:
+    image: alpine:latest
+    container_name: incident-quota-exceeded
+    mem_limit: 32m
+    memswap_limit: 32m
+    cpus: 0.1
+    command: >
+      sh -c "
+        echo '[INCIDENT-16] Resource quota simulation';
+        echo '[LIMITS] mem_limit=32MB cpu=0.1';
+        echo '';
+
+        echo '[TEST 1] Memory quota...';
+        python3 -c \"
+        data = []
+        for i in range(50):
+            data.append('x' * 1024 * 1024)
+            print(f'Allocated {i+1}MB', flush=True)
+        \" 2>&1 || echo '[OOM] Killed — exceeded memory quota!';
+
+        echo '';
+        echo '[TEST 2] CPU quota...';
+        echo '[INFO] Running CPU-intensive task with 0.1 CPU limit';
+        timeout 5 sh -c 'while true; do :; done' && echo 'done' || echo '[CPU] CPU throttled — task took too long';
+
+        echo '';
+        echo '[DIAGNOSIS] Current resource usage:';
+        cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null || echo 'cgroup v2 not accessible in container';
+        sleep infinity
+      "

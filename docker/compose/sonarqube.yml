@@ -1,0 +1,54 @@
+name: devops-sonarqube
+
+networks:
+  cicd:
+    external: true
+    name: devops-cicd
+
+services:
+  sonar-postgres:
+    image: postgres:15-alpine
+    container_name: sonar-postgres
+    restart: "no"
+    environment:
+      POSTGRES_USER: sonar
+      POSTGRES_PASSWORD: ${SONAR_JDBC_PASSWORD:-DevOps2024!Sonar}
+      POSTGRES_DB: sonarqube
+    volumes:
+      - ${DATA_ROOT:-~/devops-infra/data}/sonar-postgres:/var/lib/postgresql/data
+    networks:
+      - cicd
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "sonar"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  sonarqube:
+    image: sonarqube:10.4-community
+    container_name: sonarqube
+    restart: "no"
+    ports:
+      - "9000:9000"
+    depends_on:
+      sonar-postgres:
+        condition: service_healthy
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://sonar-postgres:5432/sonarqube
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: ${SONAR_JDBC_PASSWORD:-DevOps2024!Sonar}
+    volumes:
+      - ${DATA_ROOT:-~/devops-infra/data}/sonarqube:/opt/sonarqube/data
+    networks:
+      - cicd
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/api/system/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

@@ -1,0 +1,131 @@
+---
+- name: Validate full infrastructure
+  hosts: localhost
+  become: false
+  gather_facts: true
+  tags: [validate, test]
+
+  vars:
+    infra_dir: "{{ lookup('env', 'HOME') }}/devops-infra"
+    services_to_check:
+      - name: prometheus
+        port: 9090
+        path: "/-/healthy"
+        expected: "Prometheus"
+      - name: grafana
+        port: 3000
+        path: "/api/health"
+        expected: "ok"
+      - name: alertmanager
+        port: 9093
+        path: "/-/healthy"
+        expected: "OK"
+      - name: elasticsearch
+        port: 9200
+        path: "/_cluster/health"
+        expected: "green\\|yellow"
+      - name: kibana
+        port: 5601
+        path: "/api/status"
+        expected: "available"
+      - name: vault
+        port: 8200
+        path: "/v1/sys/health"
+        expected: "initialized"
+      - name: consul
+        port: 8500
+        path: "/v1/agent/self"
+        expected: "Config"
+      - name: minio
+        port: 9001
+        path: "/minio/health/live"
+        expected: ""
+
+  tasks:
+    - name: Check port availability
+      wait_for:
+        host: localhost
+        port: "{{ item.port }}"
+        timeout: 5
+        state: started
+      register: port_check
+      ignore_errors: true
+      loop: "{{ services_to_check }}"
+      loop_control:
+        label: "{{ item.name }}:{{ item.port }}"
+
+    - name: Print port check results
+      debug:
+        msg: >
+          {{ item.item.name }}:{{ item.item.port }} -
+          {{ 'UP' if not item.failed else 'DOWN' }}
+      loop: "{{ port_check.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Check HTTP health endpoints
+      uri:
+        url: "http://localhost:{{ item.port }}{{ item.path }}"
+        method: GET
+        timeout: 10
+        status_code: [200, 204, 301, 302]
+      register: http_check
+      ignore_errors: true
+      loop: "{{ services_to_check }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Check kubectl cluster access
+      command: kubectl cluster-info
+      register: k8s_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Check K8s node status
+      command: kubectl get nodes
+      register: nodes_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Check K8s pods status
+      command: kubectl get pods --all-namespaces
+      register: pods_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Check Docker is running
+      command: docker info
+      register: docker_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Check running containers
+      command: docker ps --format "{{ '{{' }}.Names{{ '}}' }}"
+      register: containers_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Check disk usage
+      command: df -h
+      register: disk_check
+      changed_when: false
+
+    - name: Check memory
+      command: free -h
+      register: mem_check
+      changed_when: false
+
+    - name: Validation summary
+      debug:
+        msg:
+          - "=== INFRASTRUCTURE VALIDATION SUMMARY ==="
+          - "Docker: {{ 'OK' if docker_check.rc == 0 else 'FAIL - Docker not running' }}"
+          - "K8s: {{ 'OK' if k8s_check.rc == 0 else 'FAIL - K3s not running' }}"
+          - "Running containers: {{ containers_check.stdout_lines | length if containers_check.rc == 0 else 0 }}"
+          - "Nodes: {{ nodes_check.stdout_lines | length - 1 if nodes_check.rc == 0 else 0 }}"
+          - ""
+          - "=== MEMORY ==="
+          - "{{ mem_check.stdout }}"
+          - ""
+          - "=== DISK ==="
+          - "{{ disk_check.stdout }}"

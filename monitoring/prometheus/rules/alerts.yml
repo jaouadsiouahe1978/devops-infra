@@ -1,0 +1,316 @@
+groups:
+  # ==========================================================================
+  # HOST / NODE ALERTS
+  # ==========================================================================
+  - name: host.rules
+    rules:
+      - alert: HostHighCpuLoad
+        expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: node
+        annotations:
+          summary: "Host high CPU load ({{ $labels.instance }})"
+          description: "CPU load is {{ $value | humanize }}% > 80%"
+          runbook: "docs/INCIDENTS.md#3-memory-leak"
+
+      - alert: HostCriticalCpuLoad
+        expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 95
+        for: 2m
+        labels:
+          severity: critical
+          service: node
+        annotations:
+          summary: "Host CRITICAL CPU load ({{ $labels.instance }})"
+          description: "CPU load is {{ $value | humanize }}% > 95%"
+
+      - alert: HostHighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+          service: node
+        annotations:
+          summary: "Host high memory usage ({{ $labels.instance }})"
+          description: "Memory usage is {{ $value | humanize }}%"
+
+      - alert: HostOutOfMemory
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100 < 5
+        for: 2m
+        labels:
+          severity: critical
+          service: node
+        annotations:
+          summary: "Host out of memory ({{ $labels.instance }})"
+          description: "Less than 5% memory available"
+          runbook: "docs/INCIDENTS.md#3-memory-leak"
+
+      - alert: HostDiskSpaceLow
+        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.lxcfs"} / node_filesystem_size_bytes) * 100 < 15
+        for: 5m
+        labels:
+          severity: warning
+          service: node
+        annotations:
+          summary: "Disk space low ({{ $labels.mountpoint }})"
+          description: "{{ $value | humanize }}% free on {{ $labels.mountpoint }}"
+          runbook: "docs/INCIDENTS.md#2-disk-full"
+
+      - alert: HostDiskSpaceCritical
+        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.lxcfs"} / node_filesystem_size_bytes) * 100 < 5
+        for: 1m
+        labels:
+          severity: critical
+          service: node
+        annotations:
+          summary: "Disk space CRITICAL ({{ $labels.mountpoint }})"
+          description: "Only {{ $value | humanize }}% free on {{ $labels.mountpoint }}"
+
+      - alert: HostDiskReadingTooMuch
+        expr: rate(node_disk_read_bytes_total[2m]) > 50 * 1024 * 1024
+        for: 5m
+        labels:
+          severity: warning
+          service: node
+        annotations:
+          summary: "High disk read I/O ({{ $labels.instance }})"
+          description: "{{ $value | humanize }}B/s read"
+
+      - alert: HostNetworkReceiveErrors
+        expr: rate(node_network_receive_errs_total[2m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          service: network
+        annotations:
+          summary: "Network receive errors ({{ $labels.device }})"
+
+  # ==========================================================================
+  # SERVICE AVAILABILITY
+  # ==========================================================================
+  - name: service.availability
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service DOWN: {{ $labels.job }} ({{ $labels.instance }})"
+          description: "{{ $labels.job }} has been unreachable for > 2 minutes"
+          runbook: "docs/INCIDENTS.md#18-orchestrator-failure"
+
+      - alert: ServiceFlapping
+        expr: changes(up[15m]) > 4
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Service flapping: {{ $labels.job }}"
+          description: "Service has changed state {{ $value }} times in 15 minutes"
+
+  # ==========================================================================
+  # KUBERNETES
+  # ==========================================================================
+  - name: kubernetes.rules
+    rules:
+      - alert: KubernetesPodCrashLooping
+        expr: rate(kube_pod_container_status_restarts_total[15m]) * 60 * 15 > 5
+        for: 1m
+        labels:
+          severity: critical
+          service: kubernetes
+        annotations:
+          summary: "Pod CrashLoopBackOff: {{ $labels.pod }}"
+          description: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is restarting {{ $value | humanize }} times/15min"
+          runbook: "docs/INCIDENTS.md#1-pod-crashloopbackoff"
+
+      - alert: KubernetesPodNotReady
+        expr: kube_pod_status_phase{phase=~"Pending|Unknown"} > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: kubernetes
+        annotations:
+          summary: "Pod not ready: {{ $labels.pod }}"
+          description: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is {{ $labels.phase }}"
+
+      - alert: KubernetesDeploymentReplicasMismatch
+        expr: kube_deployment_spec_replicas != kube_deployment_status_available_replicas
+        for: 10m
+        labels:
+          severity: warning
+          service: kubernetes
+        annotations:
+          summary: "Deployment replicas mismatch: {{ $labels.deployment }}"
+          description: "Expected {{ $value }} replicas for {{ $labels.namespace }}/{{ $labels.deployment }}"
+
+      - alert: KubernetesPVCPending
+        expr: kube_persistentvolumeclaim_status_phase{phase="Pending"} == 1
+        for: 2m
+        labels:
+          severity: critical
+          service: kubernetes
+        annotations:
+          summary: "PVC Pending: {{ $labels.persistentvolumeclaim }}"
+          description: "PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} is stuck in Pending"
+          runbook: "docs/INCIDENTS.md#7-pvc-mount-failed"
+
+      - alert: KubernetesNodeNotReady
+        expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: kubernetes
+        annotations:
+          summary: "Node not ready: {{ $labels.node }}"
+
+      - alert: KubernetesResourceQuotaExceeded
+        expr: kube_resourcequota{type="used"} / kube_resourcequota{type="hard"} > 0.90
+        for: 5m
+        labels:
+          severity: warning
+          service: kubernetes
+        annotations:
+          summary: "Resource quota >90%: {{ $labels.namespace }}/{{ $labels.resource }}"
+          runbook: "docs/INCIDENTS.md#16-resource-quota-exceeded"
+
+  # ==========================================================================
+  # DATABASES
+  # ==========================================================================
+  - name: database.rules
+    rules:
+      - alert: PostgreSQLTooManyConnections
+        expr: pg_stat_activity_count > pg_settings_max_connections * 0.8
+        for: 2m
+        labels:
+          severity: warning
+          service: postgres
+        annotations:
+          summary: "PostgreSQL too many connections"
+          description: "{{ $value | humanize }} connections (>80% of max)"
+
+      - alert: PostgreSQLDeadlock
+        expr: rate(pg_stat_database_deadlocks[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          service: postgres
+        annotations:
+          summary: "PostgreSQL deadlocks detected"
+          description: "{{ $value | humanize }} deadlocks/5min"
+          runbook: "docs/INCIDENTS.md#4-database-deadlock"
+
+      - alert: PostgreSQLSlowQueries
+        expr: pg_stat_activity_max_tx_duration > 300
+        for: 2m
+        labels:
+          severity: warning
+          service: postgres
+        annotations:
+          summary: "PostgreSQL slow query > 5 minutes"
+
+      - alert: RedisOutOfMemory
+        expr: redis_memory_used_bytes / redis_memory_max_bytes * 100 > 90
+        for: 2m
+        labels:
+          severity: critical
+          service: redis
+        annotations:
+          summary: "Redis memory usage > 90%"
+          runbook: "docs/INCIDENTS.md#15-cache-invalidation"
+
+      - alert: ElasticsearchClusterRed
+        expr: elasticsearch_cluster_health_status{color="red"} == 1
+        for: 1m
+        labels:
+          severity: critical
+          service: elasticsearch
+        annotations:
+          summary: "Elasticsearch cluster status RED"
+
+      - alert: ElasticsearchClusterYellow
+        expr: elasticsearch_cluster_health_status{color="yellow"} == 1
+        for: 5m
+        labels:
+          severity: warning
+          service: elasticsearch
+        annotations:
+          summary: "Elasticsearch cluster status YELLOW"
+
+  # ==========================================================================
+  # CERTIFICATES
+  # ==========================================================================
+  - name: certificate.rules
+    rules:
+      - alert: CertificateExpiringSoon
+        expr: (ssl_certificate_expiry_seconds - time()) / 86400 < 30
+        for: 1h
+        labels:
+          severity: warning
+          service: tls
+        annotations:
+          summary: "Certificate expiring in {{ $value | humanize }} days"
+          runbook: "docs/INCIDENTS.md#6-certificate-expired"
+
+      - alert: CertificateExpiryCritical
+        expr: (ssl_certificate_expiry_seconds - time()) / 86400 < 7
+        for: 1h
+        labels:
+          severity: critical
+          service: tls
+        annotations:
+          summary: "Certificate CRITICAL: expires in {{ $value | humanize }} days"
+
+  # ==========================================================================
+  # MESSAGING
+  # ==========================================================================
+  - name: messaging.rules
+    rules:
+      - alert: KafkaConsumerGroupLag
+        expr: kafka_consumergroup_lag > 10000
+        for: 5m
+        labels:
+          severity: warning
+          service: kafka
+        annotations:
+          summary: "Kafka consumer lag: {{ $labels.consumergroup }}"
+          description: "Consumer group {{ $labels.consumergroup }} lag is {{ $value }}"
+
+      - alert: RabbitMQQueueTooLarge
+        expr: rabbitmq_queue_messages > 10000
+        for: 5m
+        labels:
+          severity: warning
+          service: rabbitmq
+        annotations:
+          summary: "RabbitMQ queue {{ $labels.queue }} has {{ $value }} messages"
+
+  # ==========================================================================
+  # BACKUP
+  # ==========================================================================
+  - name: backup.rules
+    rules:
+      - alert: BackupJobFailed
+        expr: time() - backup_last_success_timestamp > 86400 + 3600
+        for: 1m
+        labels:
+          severity: critical
+          service: backup
+        annotations:
+          summary: "Backup has not completed in 25 hours"
+          description: "Last successful backup: {{ $value | humanizeDuration }} ago"
+
+  # ==========================================================================
+  # DEAD MAN'S SWITCH
+  # ==========================================================================
+  - name: deadman
+    rules:
+      - alert: DeadMansSwitch
+        expr: vector(1)
+        labels:
+          severity: none
+        annotations:
+          summary: "Alerting pipeline is functional"
+          description: "This alert always fires to confirm the alerting system is working"

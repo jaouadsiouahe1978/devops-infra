@@ -1,0 +1,75 @@
+name: devops-storage
+
+networks:
+  storage:
+    driver: bridge
+    name: devops-storage
+
+services:
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    restart: "no"
+    ports:
+      - "9001:9000"
+      - "9002:9001"
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-DevOps2024!Minio}
+    volumes:
+      - ${DATA_ROOT:-~/devops-infra/data}/minio:/data
+    networks:
+      - storage
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  nexus:
+    image: sonatype/nexus3:3.64.0
+    container_name: nexus
+    restart: "no"
+    ports:
+      - "8084:8081"
+    volumes:
+      - ${DATA_ROOT:-~/devops-infra/data}/nexus:/nexus-data
+    networks:
+      - storage
+    mem_limit: 1.5g
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/service/rest/v1/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  registry:
+    image: registry:2
+    container_name: registry
+    restart: "no"
+    ports:
+      - "5000:5000"
+    environment:
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+    volumes:
+      - ${DATA_ROOT:-~/devops-infra/data}/registry:/var/lib/registry
+    networks:
+      - storage
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/v2/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

@@ -1,0 +1,69 @@
+---
+- name: Deploy monitoring stack via Docker Compose
+  hosts: localhost
+  become: false
+  gather_facts: true
+  tags: [monitoring, install]
+
+  vars:
+    infra_dir: "{{ lookup('env', 'HOME') }}/devops-infra"
+    compose_file: "{{ infra_dir }}/docker/compose/monitoring.yml"
+
+  tasks:
+    - name: Check Docker is running
+      command: docker info
+      register: docker_info
+      changed_when: false
+      failed_when: docker_info.rc != 0
+
+    - name: Create monitoring data directories
+      file:
+        path: "{{ infra_dir }}/data/{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - prometheus
+        - grafana
+        - alertmanager
+
+    - name: Set correct permissions for Grafana data dir
+      become: true
+      file:
+        path: "{{ infra_dir }}/data/grafana"
+        owner: "472"  # Grafana container user
+        group: "472"
+        mode: '0755'
+
+    - name: Set correct permissions for Prometheus data dir
+      become: true
+      file:
+        path: "{{ infra_dir }}/data/prometheus"
+        owner: "65534"  # nobody
+        group: "65534"
+        mode: '0755'
+
+    - name: Ensure prometheus config is in place
+      stat:
+        path: "{{ infra_dir }}/monitoring/prometheus/prometheus.yml"
+      register: prom_config
+
+    - name: Warn if prometheus config missing
+      debug:
+        msg: "WARNING: prometheus.yml not found at {{ infra_dir }}/monitoring/prometheus/prometheus.yml"
+      when: not prom_config.stat.exists
+
+    - name: Pull monitoring Docker images
+      command: docker compose -f {{ compose_file }} pull
+      register: docker_pull
+      changed_when: "'Pull complete' in docker_pull.stdout"
+      ignore_errors: true
+
+    - name: Print monitoring access info
+      debug:
+        msg:
+          - "Start monitoring: make monitoring-start"
+          - "  OR: docker compose -f {{ compose_file }} up -d"
+          - "Grafana:      http://localhost:3000 (admin/admin)"
+          - "Prometheus:   http://localhost:9090"
+          - "Alertmanager: http://localhost:9093"
+          - "Node Exporter: http://localhost:9100/metrics"

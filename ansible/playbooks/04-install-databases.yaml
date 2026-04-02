@@ -1,0 +1,300 @@
+---
+- name: Install and configure databases
+  hosts: localhost
+  become: true
+  gather_facts: true
+  tags: [databases, install]
+
+  vars:
+    db_user: "{{ lookup('env', 'USER') }}"
+    data_root: "{{ lookup('env', 'HOME') }}/devops-infra/data"
+    compose_file: "{{ lookup('env', 'HOME') }}/devops-infra/docker/compose/databases.yml"
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # PostgreSQL
+    # -------------------------------------------------------------------------
+    - name: Add PostgreSQL apt repository
+      block:
+        - name: Add PostgreSQL GPG key
+          get_url:
+            url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+            dest: /etc/apt/keyrings/postgresql.asc
+            mode: '0644'
+
+        - name: Add PostgreSQL repository
+          apt_repository:
+            repo: >
+              deb [signed-by=/etc/apt/keyrings/postgresql.asc]
+              https://apt.postgresql.org/pub/repos/apt
+              {{ ansible_distribution_release }}-pgdg main
+            state: present
+            filename: postgresql
+            update_cache: true
+      tags: [postgres]
+
+    - name: Install PostgreSQL 15
+      apt:
+        name:
+          - postgresql-15
+          - postgresql-client-15
+          - postgresql-contrib-15
+          - libpq-dev
+        state: present
+      tags: [postgres]
+
+    - name: Stop PostgreSQL (we'll configure data dir first)
+      systemd:
+        name: postgresql
+        state: stopped
+      tags: [postgres]
+
+    - name: Create PostgreSQL data directory
+      file:
+        path: "{{ data_root }}/postgres"
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: '0700'
+      tags: [postgres]
+
+    - name: Configure PostgreSQL to use custom data dir
+      template:
+        src: /dev/stdin
+        dest: /etc/postgresql/15/main/postgresql.conf
+        backup: true
+      vars:
+        content: |
+          data_directory = '{{ data_root }}/postgres'
+          hba_file = '/etc/postgresql/15/main/pg_hba.conf'
+          ident_file = '/etc/postgresql/15/main/pg_ident.conf'
+          listen_addresses = 'localhost'
+          port = 5432
+          max_connections = 200
+          shared_buffers = 256MB
+          effective_cache_size = 1GB
+          maintenance_work_mem = 128MB
+          checkpoint_completion_target = 0.9
+          wal_buffers = 16MB
+          default_statistics_target = 100
+          random_page_cost = 1.1
+          log_timezone = 'UTC'
+          datestyle = 'iso, mdy'
+          timezone = 'UTC'
+          lc_messages = 'en_US.UTF-8'
+          lc_monetary = 'en_US.UTF-8'
+          lc_numeric = 'en_US.UTF-8'
+          lc_time = 'en_US.UTF-8'
+          default_text_search_config = 'pg_catalog.english'
+          # Logging
+          log_destination = 'stderr'
+          logging_collector = on
+          log_directory = '{{ lookup("env", "HOME") }}/devops-infra/logs/postgres'
+          log_filename = 'postgresql-%Y-%m-%d.log'
+          log_min_duration_statement = 1000
+          log_lock_waits = on
+          log_deadlocks = on
+          # Performance
+          work_mem = 4MB
+          track_activities = on
+          track_counts = on
+          track_io_timing = on
+      args:
+        stdin: "{{ content }}"
+      ignore_errors: true
+      tags: [postgres]
+
+    - name: Initialize PostgreSQL data directory if empty
+      command: >
+        sudo -u postgres /usr/lib/postgresql/15/bin/initdb
+        -D {{ data_root }}/postgres
+        --encoding=UTF8
+        --locale=en_US.UTF-8
+      args:
+        creates: "{{ data_root }}/postgres/PG_VERSION"
+      tags: [postgres]
+
+    - name: Configure pg_hba.conf for local access
+      copy:
+        dest: /etc/postgresql/15/main/pg_hba.conf
+        content: |
+          # TYPE  DATABASE  USER      ADDRESS         METHOD
+          local   all       postgres                  peer
+          local   all       all                       md5
+          host    all       all       127.0.0.1/32    md5
+          host    all       all       ::1/128         md5
+        mode: '0640'
+        owner: postgres
+        group: postgres
+      tags: [postgres]
+
+    - name: Start PostgreSQL
+      systemd:
+        name: postgresql
+        state: started
+        enabled: false  # Manual start, user manages this
+      tags: [postgres]
+
+    # -------------------------------------------------------------------------
+    # MySQL
+    # -------------------------------------------------------------------------
+    - name: Install MySQL 8.0
+      apt:
+        name:
+          - mysql-server
+          - mysql-client
+          - libmysqlclient-dev
+        state: present
+      tags: [mysql]
+
+    - name: Stop MySQL for configuration
+      systemd:
+        name: mysql
+        state: stopped
+      tags: [mysql]
+
+    - name: Configure MySQL
+      copy:
+        dest: /etc/mysql/mysql.conf.d/devops.cnf
+        content: |
+          [mysqld]
+          datadir         = {{ data_root }}/mysql
+          socket          = /var/run/mysqld/mysqld.sock
+          bind-address    = 127.0.0.1
+          port            = 3306
+          max_connections = 200
+          innodb_buffer_pool_size = 256M
+          slow_query_log  = 1
+          slow_query_log_file = {{ lookup('env', 'HOME') }}/devops-infra/logs/mysql/slow-query.log
+          long_query_time = 2
+          general_log     = 0
+          log_error       = {{ lookup('env', 'HOME') }}/devops-infra/logs/mysql/error.log
+          [mysql]
+          default-character-set = utf8mb4
+          [client]
+          port            = 3306
+          socket          = /var/run/mysqld/mysqld.sock
+      tags: [mysql]
+
+    - name: Create MySQL log directory
+      file:
+        path: "{{ lookup('env', 'HOME') }}/devops-infra/logs/mysql"
+        state: directory
+        owner: mysql
+        group: mysql
+        mode: '0755'
+      tags: [mysql]
+
+    # -------------------------------------------------------------------------
+    # Redis
+    # -------------------------------------------------------------------------
+    - name: Install Redis
+      apt:
+        name:
+          - redis-server
+          - redis-tools
+        state: present
+      tags: [redis]
+
+    - name: Configure Redis
+      template:
+        src: /dev/stdin
+        dest: /etc/redis/redis.conf
+        backup: true
+        mode: '0640'
+        owner: redis
+        group: redis
+      vars:
+        content: |
+          bind 127.0.0.1
+          port 6379
+          protected-mode yes
+          requirepass DevOps2024!Redis
+          maxmemory 512mb
+          maxmemory-policy allkeys-lru
+          dir {{ data_root }}/redis
+          dbfilename dump.rdb
+          save 900 1
+          save 300 10
+          save 60 10000
+          appendonly yes
+          appendfilename "appendonly.aof"
+          appendfsync everysec
+          logfile {{ lookup('env', 'HOME') }}/devops-infra/logs/redis/redis.log
+          loglevel notice
+      args:
+        stdin: "{{ content }}"
+      ignore_errors: true
+      tags: [redis]
+
+    # -------------------------------------------------------------------------
+    # MongoDB
+    # -------------------------------------------------------------------------
+    - name: Add MongoDB GPG key
+      get_url:
+        url: https://www.mongodb.org/static/pgp/server-7.0.asc
+        dest: /etc/apt/keyrings/mongodb.asc
+        mode: '0644'
+      tags: [mongodb]
+
+    - name: Add MongoDB repository
+      apt_repository:
+        repo: >
+          deb [arch=amd64,arm64 signed-by=/etc/apt/keyrings/mongodb.asc]
+          https://repo.mongodb.org/apt/ubuntu
+          {{ ansible_distribution_release }}/mongodb-org/7.0 multiverse
+        state: present
+        filename: mongodb
+        update_cache: true
+      tags: [mongodb]
+
+    - name: Install MongoDB
+      apt:
+        name:
+          - mongodb-org
+          - mongodb-org-tools
+        state: present
+      tags: [mongodb]
+
+    - name: Configure MongoDB
+      copy:
+        dest: /etc/mongod.conf
+        content: |
+          storage:
+            dbPath: {{ data_root }}/mongodb
+            journal:
+              enabled: true
+          systemLog:
+            destination: file
+            logAppend: true
+            path: {{ lookup('env', 'HOME') }}/devops-infra/logs/mongodb/mongod.log
+          net:
+            port: 27017
+            bindIp: 127.0.0.1
+          processManagement:
+            timeZoneInfo: /usr/share/zoneinfo
+          security:
+            authorization: disabled
+      tags: [mongodb]
+
+    - name: Create log directories for all databases
+      file:
+        path: "{{ lookup('env', 'HOME') }}/devops-infra/logs/{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - postgres
+        - mysql
+        - redis
+        - mongodb
+
+  post_tasks:
+    - name: Database installation summary
+      debug:
+        msg:
+          - "PostgreSQL 15 -> port 5432 (systemctl start postgresql)"
+          - "MySQL 8.0     -> port 3306 (systemctl start mysql)"
+          - "Redis 7       -> port 6379 (systemctl start redis)"
+          - "MongoDB 7     -> port 27017 (systemctl start mongod)"
+          - "All services installed but NOT started (start manually)"
+          - "Start all: make db-start"

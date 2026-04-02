@@ -1,0 +1,78 @@
+name: devops-cicd
+
+networks:
+  cicd:
+    driver: bridge
+    name: devops-cicd
+
+services:
+  jenkins:
+    image: jenkins/jenkins:lts-jdk17
+    container_name: jenkins
+    restart: "no"
+    ports:
+      - "8081:8080"
+      - "50000:50000"
+    environment:
+      JAVA_OPTS: "-Xmx1g -Djenkins.install.runSetupWizard=false"
+    volumes:
+      - ${DATA_ROOT:-~/devops-infra/data}/jenkins:/var/jenkins_home
+    networks:
+      - cicd
+    mem_limit: 1.5g
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/login"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  gitea:
+    image: gitea/gitea:1.21-rootless
+    container_name: gitea
+    restart: "no"
+    ports:
+      - "3001:3000"
+      - "2223:2222"
+    environment:
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__server__ROOT_URL: http://localhost:3001
+    volumes:
+      - ${DATA_ROOT:-~/devops-infra/data}/gitea:/var/lib/gitea
+    networks:
+      - cicd
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  argocd:
+    image: quay.io/argoproj/argocd:v2.10.0
+    container_name: argocd
+    restart: "no"
+    ports:
+      - "8083:8080"
+    command: argocd-server --insecure
+    volumes:
+      - ${DATA_ROOT:-~/devops-infra/data}/argocd:/home/argocd
+    networks:
+      - cicd
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

@@ -1,0 +1,81 @@
+name: devops-networking
+
+networks:
+  frontend:
+    driver: bridge
+    name: devops-frontend
+
+services:
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    restart: "no"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    command:
+      - --api.insecure=true
+      - --api.dashboard=true
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --log.level=INFO
+      - --accesslog=true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${DATA_ROOT:-~/devops-infra/data}/traefik:/etc/traefik
+    networks:
+      - frontend
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  haproxy:
+    image: haproxy:2.9-alpine
+    container_name: haproxy
+    restart: "no"
+    ports:
+      - "8090:80"
+      - "9999:9999"
+    volumes:
+      - ${INFRA_DIR:-~/devops-infra}/docker/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      - frontend
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  nginx-proxy:
+    image: nginx:1.25-alpine
+    container_name: nginx-proxy
+    restart: "no"
+    ports:
+      - "8091:80"
+    volumes:
+      - ${INFRA_DIR:-~/devops-infra}/docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${INFRA_DIR:-~/devops-infra}/logs/nginx:/var/log/nginx
+    networks:
+      - frontend
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

@@ -1,0 +1,30 @@
+version: "3.8"
+
+services:
+  app-with-bad-mount:
+    image: alpine:latest
+    container_name: incident-pvc-mount
+    volumes:
+      - /nonexistent/path/on/host:/data/app
+    command: >
+      sh -c "
+        echo '[INCIDENT-07] Checking volume mount...';
+        ls /data/app && echo '[OK] Volume mounted' || echo '[ERROR] Volume mount failed!';
+        df -h /data/app 2>&1 || echo '[ERROR] Cannot stat mount point';
+        sleep infinity
+      "
+
+  app-with-readonly-mount:
+    image: alpine:latest
+    container_name: incident-pvc-readonly
+    volumes:
+      - ro-data:/data:ro
+    command: >
+      sh -c "
+        echo '[INCIDENT-07b] Testing read-only volume write...';
+        echo 'test' > /data/testfile 2>&1 || echo '[ERROR] Read-only filesystem - cannot write!';
+        sleep infinity
+      "
+
+volumes:
+  ro-data:

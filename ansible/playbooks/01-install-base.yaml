@@ -1,0 +1,185 @@
+---
+- name: Install base tools and configure system
+  hosts: localhost
+  become: true
+  gather_facts: true
+  tags: [base, install]
+
+  vars:
+    base_packages:
+      - git
+      - curl
+      - wget
+      - jq
+      - vim
+      - tmux
+      - htop
+      - ncdu
+      - net-tools
+      - lsof
+      - strace
+      - ltrace
+      - tcpdump
+      - nmap
+      - iotop
+      - sysstat
+      - dstat
+      - tree
+      - unzip
+      - zip
+      - gnupg
+      - ca-certificates
+      - apt-transport-https
+      - software-properties-common
+      - python3-pip
+      - python3-venv
+      - build-essential
+      - openssl
+      - netcat-openbsd
+      - dnsutils
+      - iputils-ping
+      - traceroute
+      - mtr
+      - stress-ng
+
+  pre_tasks:
+    - name: Check OS compatibility
+      assert:
+        that:
+          - ansible_os_family == "Debian"
+        fail_msg: "This playbook requires Ubuntu/Debian"
+
+    - name: Update apt cache
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+      changed_when: false
+
+  tasks:
+    - name: Install base packages
+      apt:
+        name: "{{ base_packages }}"
+        state: present
+      register: packages_result
+
+    - name: Install yq (YAML processor)
+      get_url:
+        url: "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64"
+        dest: /usr/local/bin/yq
+        mode: '0755'
+      register: yq_install
+      failed_when: false
+
+    - name: Install kubectl
+      block:
+        - name: Add kubectl apt key
+          get_url:
+            url: https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key
+            dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+            mode: '0644'
+
+        - name: Add kubectl repository
+          apt_repository:
+            repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.asc] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /"
+            state: present
+            filename: kubernetes
+
+        - name: Install kubectl
+          apt:
+            name: kubectl
+            state: present
+            update_cache: true
+      tags: [kubectl]
+
+    - name: Install Helm
+      block:
+        - name: Download Helm install script
+          get_url:
+            url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+            dest: /tmp/get_helm.sh
+            mode: '0755'
+
+        - name: Run Helm install script
+          command: /tmp/get_helm.sh
+          args:
+            creates: /usr/local/bin/helm
+          environment:
+            HELM_INSTALL_DIR: /usr/local/bin
+      tags: [helm]
+
+    - name: Configure vim
+      copy:
+        dest: "/home/{{ ansible_user }}/.vimrc"
+        owner: "{{ ansible_user }}"
+        mode: '0644'
+        content: |
+          set number
+          set expandtab
+          set tabstop=2
+          set shiftwidth=2
+          set autoindent
+          set syntax=on
+          set background=dark
+          set hlsearch
+          set incsearch
+          set ruler
+          set wildmenu
+
+    - name: Configure tmux
+      copy:
+        dest: "/home/{{ ansible_user }}/.tmux.conf"
+        owner: "{{ ansible_user }}"
+        mode: '0644'
+        content: |
+          set -g prefix C-a
+          unbind C-b
+          bind C-a send-prefix
+          set -g mouse on
+          set -g history-limit 50000
+          set -g default-terminal "screen-256color"
+          set -g status-bg colour235
+          set -g status-fg white
+          set -g status-left '#[fg=green]#H '
+          set -g status-right '#[fg=yellow]%H:%M %d-%b-%y'
+
+    - name: Add useful shell aliases
+      blockinfile:
+        path: "/home/{{ ansible_user }}/.bashrc"
+        marker: "# {mark} DEVOPS INFRA ALIASES"
+        block: |
+          # DevOps Infra aliases
+          export INFRA="${HOME}/devops-infra"
+          alias k='kubectl'
+          alias kns='kubectl config set-context --current --namespace'
+          alias kga='kubectl get all --all-namespaces'
+          alias kgp='kubectl get pods --all-namespaces'
+          alias dc='docker compose'
+          alias dp='docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
+          alias health='${INFRA}/scripts/health-check.sh'
+          alias ports='${INFRA}/scripts/port-check.sh'
+          alias infra-backup='${INFRA}/scripts/backup.sh --service=all'
+          alias incident='${INFRA}/scripts/incident-simulator.sh'
+          # Kubernetes completion
+          source <(kubectl completion bash 2>/dev/null) || true
+          complete -o default -F __start_kubectl k 2>/dev/null || true
+
+    - name: Create devops-infra directory structure
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        mode: '0755'
+      loop:
+        - "{{ infra_dir }}"
+        - "{{ data_dir }}"
+        - "{{ logs_dir }}"
+        - "{{ backup_dir }}"
+        - "{{ infra_dir }}/certs"
+
+  post_tasks:
+    - name: Print base installation summary
+      debug:
+        msg:
+          - "Base tools installed: {{ base_packages | length }} packages"
+          - "yq: {{ 'installed' if yq_install is changed else 'already present' }}"
+          - "Infra dir: {{ infra_dir }}"

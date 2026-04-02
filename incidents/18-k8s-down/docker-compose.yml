@@ -1,0 +1,30 @@
+version: "3.8"
+
+services:
+  k8s-simulator:
+    image: alpine:latest
+    container_name: incident-k8s-down
+    command: >
+      sh -c "
+        echo '[INCIDENT-18] Simulating K3s/Kubernetes orchestrator failure';
+        echo '';
+        echo '[STATUS] Checking cluster health...';
+        echo 'The connection to the server localhost:6443 was refused';
+        echo '- did you specify the right host or port?';
+        echo '';
+        echo '[SYMPTOMS]';
+        echo '  - kubectl commands hang or return connection refused';
+        echo '  - All workloads continue running (kubelet is independent)';
+        echo '  - No new pods can be scheduled';
+        echo '  - HPA and controllers are offline';
+        echo '';
+        echo '[DIAGNOSIS STEPS]';
+        echo '  1. systemctl status k3s';
+        echo '  2. journalctl -u k3s -n 50';
+        echo '  3. Check /var/lib/rancher/k3s/server/logs/';
+        echo '  4. Check etcd health: etcdctl endpoint health';
+        echo '';
+        echo '[RESOLUTION]';
+        echo '  systemctl restart k3s';
+        sleep infinity
+      "

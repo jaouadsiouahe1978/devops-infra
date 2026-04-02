@@ -1,0 +1,42 @@
+version: "3.8"
+
+services:
+  consul-1:
+    image: hashicorp/consul:latest
+    container_name: incident-consul-1
+    command: >
+      consul agent -server -bootstrap-expect=3
+      -node=consul-1 -bind=0.0.0.0
+      -advertise=consul-1
+      -retry-join=consul-2 -retry-join=consul-3
+      -client=0.0.0.0
+    networks:
+      - consul-net
+
+  consul-2:
+    image: hashicorp/consul:latest
+    container_name: incident-consul-2
+    command: >
+      consul agent -server -bootstrap-expect=3
+      -node=consul-2 -bind=0.0.0.0
+      -advertise=consul-2
+      -retry-join=consul-1 -retry-join=consul-3
+      -client=0.0.0.0
+    networks:
+      - consul-net
+
+  consul-3:
+    image: hashicorp/consul:latest
+    container_name: incident-consul-3
+    command: >
+      consul agent -server -bootstrap-expect=3
+      -node=consul-3 -bind=0.0.0.0
+      -advertise=consul-3
+      -retry-join=consul-1 -retry-join=consul-2
+      -client=0.0.0.0
+    networks:
+      - consul-net
+
+networks:
+  consul-net:
+    driver: bridge

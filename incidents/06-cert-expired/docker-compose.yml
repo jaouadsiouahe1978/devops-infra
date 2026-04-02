@@ -1,0 +1,38 @@
+version: "3.8"
+
+services:
+  cert-generator:
+    image: alpine:latest
+    container_name: incident-cert-expired
+    command: >
+      sh -c "
+        apk add -q openssl;
+        echo '[INCIDENT-06] Generating expired certificate...';
+        openssl req -x509 -newkey rsa:2048 -keyout /certs/key.pem -out /certs/cert.pem \
+          -days 1 -nodes \
+          -subj '/CN=devops-lab.local/O=DevOps/C=FR' \
+          -not_before 20200101000000Z -not_after 20200102000000Z 2>/dev/null || \
+        openssl req -x509 -newkey rsa:2048 -keyout /certs/key.pem -out /certs/cert.pem \
+          -days 1 -nodes \
+          -subj '/CN=devops-lab.local/O=DevOps/C=FR' 2>/dev/null;
+        echo '[CERT] Certificate info:';
+        openssl x509 -in /certs/cert.pem -noout -dates;
+        echo '[ALERT] Certificate expires soon or already expired!';
+        sleep infinity
+      "
+    volumes:
+      - certs:/certs
+
+  nginx-tls:
+    image: nginx:alpine
+    container_name: incident-nginx-tls
+    ports:
+      - "18443:443"
+    volumes:
+      - certs:/etc/nginx/certs:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - cert-generator
+
+volumes:
+  certs:

@@ -1,0 +1,57 @@
+groups:
+  - name: node.recording
+    interval: 1m
+    rules:
+      - record: instance:node_cpu_utilisation:rate5m
+        expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)
+
+      - record: instance:node_memory_utilisation
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100
+
+      - record: instance:node_disk_io_utilisation:rate5m
+        expr: avg by(instance, device) (irate(node_disk_io_time_seconds_total[5m]))
+
+      - record: instance:node_network_transmit_bytes:rate5m
+        expr: sum by(instance) (irate(node_network_transmit_bytes_total[5m]))
+
+      - record: instance:node_network_receive_bytes:rate5m
+        expr: sum by(instance) (irate(node_network_receive_bytes_total[5m]))
+
+  - name: http.recording
+    interval: 1m
+    rules:
+      - record: job:http_requests_total:rate5m
+        expr: sum by(job, status_code) (rate(http_requests_total[5m]))
+
+      - record: job:http_request_duration_seconds:p50
+        expr: histogram_quantile(0.50, sum by(job, le) (rate(http_request_duration_seconds_bucket[5m])))
+
+      - record: job:http_request_duration_seconds:p90
+        expr: histogram_quantile(0.90, sum by(job, le) (rate(http_request_duration_seconds_bucket[5m])))
+
+      - record: job:http_request_duration_seconds:p99
+        expr: histogram_quantile(0.99, sum by(job, le) (rate(http_request_duration_seconds_bucket[5m])))
+
+      - record: job:http_error_rate:rate5m
+        expr: sum by(job) (rate(http_requests_total{status_code=~"5.."}[5m])) / sum by(job) (rate(http_requests_total[5m]))
+
+  - name: kubernetes.recording
+    interval: 1m
+    rules:
+      - record: namespace:kube_pod_container_resource_requests:sum
+        expr: sum by(namespace, resource) (kube_pod_container_resource_requests)
+
+      - record: namespace:kube_pod_container_resource_limits:sum
+        expr: sum by(namespace, resource) (kube_pod_container_resource_limits)
+
+      - record: cluster:kube_pod_restarts:rate5m
+        expr: sum by(namespace, pod) (rate(kube_pod_container_status_restarts_total[5m]))
+
+  - name: database.recording
+    interval: 1m
+    rules:
+      - record: job:pg_connections:ratio
+        expr: pg_stat_activity_count / pg_settings_max_connections
+
+      - record: job:redis_memory:ratio
+        expr: redis_memory_used_bytes / redis_memory_max_bytes

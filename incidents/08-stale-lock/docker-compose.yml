@@ -1,0 +1,36 @@
+version: "3.8"
+
+services:
+  app-lock:
+    image: alpine:latest
+    container_name: incident-stale-lock
+    volumes:
+      - lock-data:/var/lock/app
+    command: >
+      sh -c "
+        LOCKFILE=/var/lock/app/app.lock;
+        echo '[INCIDENT-08] Checking for stale lock file...';
+
+        # Simulate stale lock (PID that no longer exists)
+        echo '99999' > \$LOCKFILE;
+        echo '[LOCK] Created stale lock with PID 99999';
+
+        # App tries to acquire lock
+        if [ -f \$LOCKFILE ]; then
+          LOCKED_PID=\$(cat \$LOCKFILE);
+          echo \"[ERROR] Lock file exists with PID: \$LOCKED_PID\";
+          if ! kill -0 \$LOCKED_PID 2>/dev/null; then
+            echo '[STALE] Process no longer running — lock is stale!';
+            echo '[FIX] Removing stale lock file...';
+            rm -f \$LOCKFILE;
+            echo \$\$ > \$LOCKFILE;
+            echo \"[OK] New lock acquired with PID \$\$\";
+          else
+            echo '[BLOCKED] Another process holds the lock. Waiting...';
+          fi
+        fi;
+        sleep infinity
+      "
+
+volumes:
+  lock-data:
