@@ -1,0 +1,17 @@
+
+╔══════════════════════════════════════════════════════════════════╗
+║              *** AUTHORIZED ACCESS ONLY ***                     ║
+║                                                                  ║
+║   BASTION HOST — DEVOPS PRODUCTION ENVIRONMENT                  ║
+║                                                                  ║
+║   All sessions are monitored and logged.                        ║
+║   Unauthorized access is strictly prohibited.                   ║
+║                                                                  ║
+║   Tools available:                                              ║
+║     kubectl  │  docker  │  git  │  curl  │  jq                 ║
+║                                                                  ║
+║   Audit log : /var/log/bastion/audit/commands.log               ║
+║   Infra dir : /infra/                                           ║
+║   Cluster   : kubectl get nodes                                 ║
+╚══════════════════════════════════════════════════════════════════╝
+

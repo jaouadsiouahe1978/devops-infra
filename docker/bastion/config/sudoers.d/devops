@@ -1,0 +1,26 @@
+# DevOps user — least privilege sudo
+# Commandes read-only SANS password
+devops ALL=(ALL) NOPASSWD: \
+    /usr/bin/docker ps, \
+    /usr/bin/docker stats, \
+    /usr/bin/docker logs *, \
+    /usr/bin/docker inspect *, \
+    /usr/bin/kubectl get *, \
+    /usr/bin/kubectl describe *, \
+    /usr/bin/kubectl logs *, \
+    /usr/bin/kubectl top *
+
+# Commandes destructives AVEC password
+devops ALL=(ALL) \
+    /usr/bin/docker stop *, \
+    /usr/bin/docker restart *, \
+    /usr/bin/docker rm *, \
+    /usr/bin/docker exec *, \
+    /usr/bin/kubectl delete *, \
+    /usr/bin/kubectl apply *, \
+    /usr/bin/kubectl patch *, \
+    /usr/bin/kubectl rollout *
+
+# Interdictions explicites
+devops ALL=(ALL) !NOPASSWD: /bin/su
+devops ALL=(ALL) !NOPASSWD: /usr/bin/passwd

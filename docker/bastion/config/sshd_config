@@ -1,0 +1,47 @@
+Port 22
+ListenAddress 0.0.0.0
+Protocol 2
+
+# Authentification - clé SSH + MFA obligatoires
+PermitRootLogin no
+PasswordAuthentication no
+ChallengeResponseAuthentication yes
+AuthenticationMethods publickey
+UsePAM yes
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+
+# Sécurité
+PermitEmptyPasswords no
+MaxAuthTries 3
+MaxSessions 5
+LoginGraceTime 30
+
+# Tunnels
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding yes
+GatewayPorts no
+PermitTunnel no
+
+# Logging
+SyslogFacility AUTH
+LogLevel VERBOSE
+
+# MOTD
+PrintMotd yes
+Banner /etc/motd
+PrintLastLog yes
+
+# Keepalive
+ClientAliveInterval 300
+ClientAliveCountMax 3
+TCPKeepAlive yes
+
+# Restriction utilisateurs
+AllowUsers devops
+
+# Ciphers modernes uniquement
+KexAlgorithms curve25519-sha256,ecdh-sha2-nistp256
+Ciphers aes256-gcm@openssh.com,chacha20-poly1305@openssh.com,aes128-gcm@openssh.com
+MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com
