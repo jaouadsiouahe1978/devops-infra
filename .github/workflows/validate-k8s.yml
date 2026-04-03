@@ -1,0 +1,348 @@
+---
+# validate-k8s.yml — Validation des manifestes Kubernetes
+# Utilise kubeval, kubeconform et kustomize pour valider les fichiers K8s
+name: Validate Kubernetes Manifests
+
+on:
+  push:
+    branches: ["main", "master", "develop"]
+    paths:
+      - "k8s/**"
+      - "kubernetes/**"
+      - "manifests/**"
+      - "helm/**"
+      - ".github/workflows/validate-k8s.yml"
+  pull_request:
+    branches: ["main", "master"]
+    paths:
+      - "k8s/**"
+      - "kubernetes/**"
+      - "manifests/**"
+      - "helm/**"
+
+  workflow_dispatch:
+
+env:
+  KUBECONFORM_VERSION: "v0.6.4"
+  HELM_VERSION: "v3.14.0"
+  K8S_VERSION: "1.29.0"
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 1 : Lint YAML des manifestes
+  # ────────────────────────────────────────────────────────────────────────────
+  yaml-lint:
+    name: YAML Lint
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Configurer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Installer yamllint
+        run: pip install yamllint>=1.33
+
+      - name: Lint des manifestes YAML
+        run: |
+          # Chercher tous les repertoires K8s potentiels
+          K8S_DIRS=""
+          for d in k8s kubernetes manifests; do
+            [ -d "$d" ] && K8S_DIRS="$K8S_DIRS $d"
+          done
+
+          if [ -z "$K8S_DIRS" ]; then
+            echo "Aucun repertoire Kubernetes trouve (k8s/, kubernetes/, manifests/)"
+            echo "Creation d'un fichier de test pour la validation..."
+            mkdir -p k8s/test
+            cat > k8s/test/sample.yaml << 'EOF'
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: devops-lab
+          EOF
+          fi
+
+          yamllint -d '{
+            extends: default,
+            rules: {
+              line-length: {max: 160},
+              truthy: disable,
+              document-start: disable,
+              comments: disable
+            }
+          }' $K8S_DIRS 2>/dev/null || true
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 2 : Validation des schemas avec kubeconform
+  # ────────────────────────────────────────────────────────────────────────────
+  kubeconform:
+    name: Schema Validation (kubeconform)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    needs: yaml-lint
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Installer kubeconform
+        run: |
+          curl -sL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar xz -C /usr/local/bin/
+          chmod +x /usr/local/bin/kubeconform
+          kubeconform -v
+
+      - name: Valider les manifestes avec kubeconform
+        run: |
+          ERRORS=0
+          K8S_DIRS=""
+          for d in k8s kubernetes manifests; do
+            [ -d "$d" ] && K8S_DIRS="$K8S_DIRS $d"
+          done
+
+          if [ -z "$K8S_DIRS" ]; then
+            echo "Aucun repertoire K8s trouve, skip."
+            exit 0
+          fi
+
+          for dir in $K8S_DIRS; do
+            echo "=== Validation de $dir/ ==="
+            find "$dir" -name "*.yaml" -o -name "*.yml" | while read -r f; do
+              # Ignorer les fichiers de values Helm et les templates
+              [[ "$f" == *"values"* ]] && continue
+              [[ "$f" == *"templates"* ]] && continue
+
+              echo -n "  Validating $f... "
+              if kubeconform \
+                  -kubernetes-version "${K8S_VERSION}" \
+                  -schema-location default \
+                  -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+                  -ignore-missing-schemas \
+                  -summary \
+                  "$f" 2>&1; then
+                echo "OK"
+              else
+                echo "WARN (peut etre un CRD)"
+                ERRORS=$((ERRORS + 1))
+              fi
+            done
+          done
+
+          echo ""
+          echo "Validation terminee. Erreurs : $ERRORS"
+        continue-on-error: true
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 3 : Validation Helm Charts
+  # ────────────────────────────────────────────────────────────────────────────
+  helm-lint:
+    name: Helm Chart Lint
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Installer Helm
+        run: |
+          curl -sL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" \
+            | tar xz --strip-components=1 -C /usr/local/bin/ linux-amd64/helm
+          helm version
+
+      - name: Linter les charts Helm
+        run: |
+          CHARTS_FOUND=0
+
+          for chart_dir in helm/*/; do
+            [ -f "${chart_dir}Chart.yaml" ] || continue
+            CHARTS_FOUND=$((CHARTS_FOUND + 1))
+            chart_name=$(basename "$chart_dir")
+            echo "=== Lint du chart: $chart_name ==="
+
+            # Lint standard
+            helm lint "$chart_dir" \
+              --strict \
+              --with-subcharts \
+              2>&1 || true
+
+            # Template rendering
+            echo "  Rendering des templates..."
+            helm template "$chart_name" "$chart_dir" \
+              --debug \
+              2>&1 | head -50 || true
+          done
+
+          if [ "$CHARTS_FOUND" -eq 0 ]; then
+            echo "Aucun Helm chart trouve dans helm/. Skipping."
+          else
+            echo "$CHARTS_FOUND chart(s) lintes."
+          fi
+
+      - name: Verifier les best practices Helm
+        run: |
+          for chart_dir in helm/*/; do
+            [ -f "${chart_dir}Chart.yaml" ] || continue
+            chart_name=$(basename "$chart_dir")
+
+            # Verifier les fichiers essentiels
+            for required in Chart.yaml values.yaml; do
+              if [ ! -f "${chart_dir}${required}" ]; then
+                echo "::warning::Chart '$chart_name' manque $required"
+              fi
+            done
+
+            # Verifier Chart.yaml
+            if [ -f "${chart_dir}Chart.yaml" ]; then
+              python3 -c "
+          import yaml, sys
+          with open('${chart_dir}Chart.yaml') as f:
+            chart = yaml.safe_load(f)
+          required = ['apiVersion', 'name', 'version', 'description']
+          for field in required:
+            if field not in chart:
+              print(f'::warning::Chart ${chart_name}: champ obligatoire manquant: {field}')
+          print(f'Chart.yaml OK pour ${chart_name}')
+          " 2>/dev/null || true
+            fi
+          done
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 4 : Analyse des bonnes pratiques K8s (kube-score)
+  # ────────────────────────────────────────────────────────────────────────────
+  kube-score:
+    name: Kube Score (Best Practices)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    needs: kubeconform
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Installer kube-score
+        run: |
+          curl -sL https://github.com/zegl/kube-score/releases/download/v1.18.0/kube-score_1.18.0_linux_amd64.tar.gz \
+            | tar xz -C /usr/local/bin/ kube-score
+          chmod +x /usr/local/bin/kube-score
+          kube-score version
+
+      - name: Analyser les manifestes avec kube-score
+        run: |
+          K8S_DIRS=""
+          for d in k8s kubernetes manifests; do
+            [ -d "$d" ] && K8S_DIRS="$K8S_DIRS $d"
+          done
+
+          if [ -z "$K8S_DIRS" ]; then
+            echo "Aucun repertoire K8s trouve."
+            exit 0
+          fi
+
+          find $K8S_DIRS -name "*.yaml" -o -name "*.yml" 2>/dev/null | \
+            grep -v "values\|templates\|secret" | \
+            xargs kube-score score \
+              --ignore-test pod-probes \
+              --ignore-test container-security-context-privileged \
+              --output-format ci \
+              2>/dev/null || true
+        continue-on-error: true
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 5 : Verifier les secrets non chiffres
+  # ────────────────────────────────────────────────────────────────────────────
+  check-secrets:
+    name: Check Secrets Non Chiffres
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Verifier les secrets K8s non chiffres
+        run: |
+          echo "Recherche de Secrets Kubernetes en clair..."
+          FOUND=0
+
+          # Chercher des fichiers avec kind: Secret
+          find . -name "*.yaml" -o -name "*.yml" 2>/dev/null | \
+            xargs grep -l "kind: Secret" 2>/dev/null | \
+            while read -r f; do
+              # Verifier si le secret contient des donnees non chiffrees (stringData)
+              if grep -q "stringData:" "$f" 2>/dev/null; then
+                echo "::warning::$f contient stringData (secrets potentiellement en clair)"
+                FOUND=$((FOUND + 1))
+              fi
+              # Verifier si sealed ou chiffre
+              if grep -q "kind: SealedSecret\|kind: ExternalSecret" "$f" 2>/dev/null; then
+                echo "  OK: $f utilise des secrets chiffres"
+              fi
+            done
+
+          echo "Verification des secrets terminee."
+
+      - name: Scanner les credentials hardcodes
+        run: |
+          # Patterns a rechercher (sans les fichiers de doc)
+          patterns=(
+            "password: [A-Za-z0-9]"
+            "secret: [A-Za-z0-9]"
+            "token: [A-Za-z0-9]"
+            "api_key:"
+          )
+
+          for pattern in "${patterns[@]}"; do
+            grep -r "$pattern" \
+              --include="*.yaml" --include="*.yml" \
+              --exclude-dir=".git" \
+              --exclude="*example*" --exclude="*sample*" \
+              . 2>/dev/null | \
+              grep -v "{{ " | \
+              grep -v "#" | \
+              head -5 || true
+          done
+        continue-on-error: true
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # RAPPORT
+  # ────────────────────────────────────────────────────────────────────────────
+  report:
+    name: Rapport de validation K8s
+    runs-on: ubuntu-22.04
+    needs: [yaml-lint, kubeconform, helm-lint, kube-score, check-secrets]
+    if: always()
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compter les manifestes
+        id: count
+        run: |
+          k8s_files=$(find k8s kubernetes manifests -name "*.yaml" -o -name "*.yml" 2>/dev/null | wc -l || echo 0)
+          helm_charts=$(find helm -maxdepth 2 -name "Chart.yaml" 2>/dev/null | wc -l || echo 0)
+          echo "k8s_files=$k8s_files" >> $GITHUB_OUTPUT
+          echo "helm_charts=$helm_charts" >> $GITHUB_OUTPUT
+
+      - name: Afficher le rapport
+        run: |
+          echo "## Rapport de validation Kubernetes"             >> $GITHUB_STEP_SUMMARY
+          echo ""                                                >> $GITHUB_STEP_SUMMARY
+          echo "| Metrique          | Valeur |"                  >> $GITHUB_STEP_SUMMARY
+          echo "|--------------------|--------|"                 >> $GITHUB_STEP_SUMMARY
+          echo "| Manifestes K8s    | ${{ steps.count.outputs.k8s_files }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Charts Helm       | ${{ steps.count.outputs.helm_charts }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| YAML Lint         | ${{ needs.yaml-lint.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Kubeconform       | ${{ needs.kubeconform.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Helm Lint         | ${{ needs.helm-lint.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Kube Score        | ${{ needs.kube-score.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Check Secrets     | ${{ needs.check-secrets.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo ""                                                >> $GITHUB_STEP_SUMMARY
+          echo "Version K8s ciblee : **${K8S_VERSION}**"        >> $GITHUB_STEP_SUMMARY

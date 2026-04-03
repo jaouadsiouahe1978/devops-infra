@@ -1,0 +1,236 @@
+---
+# 07-install-security.yaml — Installation de la stack Securite
+# Services : Vault, Consul, Keycloak
+# Usage: ansible-playbook -i inventory/hosts.ini playbooks/07-install-security.yaml
+- name: "[07] Install Security Stack — Vault, Consul, Keycloak"
+  hosts: all
+  become: false
+  gather_facts: true
+
+  vars:
+    infra_dir: "{{ ansible_env.HOME }}/devops-infra"
+    data_dir: "{{ infra_dir }}/data"
+    compose_dir: "{{ infra_dir }}/docker/compose"
+    config_dir: "{{ infra_dir }}/config/security"
+
+    # Vault
+    vault_image: "hashicorp/vault:1.16"
+    vault_port: 8200
+    vault_data_dir: "{{ data_dir }}/vault"
+    vault_root_token: "DevOps2024!VaultRoot"
+
+    # Consul
+    consul_image: "hashicorp/consul:1.18"
+    consul_port: 8500
+    consul_dns_port: 8600
+    consul_data_dir: "{{ data_dir }}/consul"
+
+    # Keycloak
+    keycloak_image: "quay.io/keycloak/keycloak:24.0"
+    keycloak_port: 8085
+    keycloak_admin_user: "admin"
+    keycloak_admin_password: "DevOps2024!Keycloak"
+    keycloak_data_dir: "{{ data_dir }}/keycloak"
+
+    security_network: "devops-security"
+
+  pre_tasks:
+    - name: Verifier que Docker est accessible
+      command: docker info
+      changed_when: false
+
+    - name: Creer les repertoires de donnees et config
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ vault_data_dir }}"
+        - "{{ consul_data_dir }}"
+        - "{{ keycloak_data_dir }}"
+        - "{{ config_dir }}/vault"
+        - "{{ compose_dir }}"
+
+    - name: Creer la configuration Vault
+      copy:
+        dest: "{{ config_dir }}/vault/config.hcl"
+        mode: "0644"
+        content: |
+          ui            = true
+          log_level     = "info"
+          disable_mlock = true
+
+          storage "file" {
+            path = "/vault/data"
+          }
+
+          listener "tcp" {
+            address     = "0.0.0.0:8200"
+            tls_disable = 1
+          }
+
+          api_addr     = "http://0.0.0.0:8200"
+          cluster_addr = "http://0.0.0.0:8201"
+
+  tasks:
+    # ─── Reseau Docker ──────────────────────────────────────────────────────
+    - name: Creer le reseau Docker devops-security
+      command: docker network create --driver bridge {{ security_network }}
+      register: network_result
+      failed_when: >
+        network_result.rc != 0 and
+        'already exists' not in network_result.stderr
+      changed_when: network_result.rc == 0
+
+    # ─── Fichier docker-compose Security ────────────────────────────────────
+    - name: Deployer le fichier docker-compose Security
+      copy:
+        dest: "{{ compose_dir }}/security.yml"
+        mode: "0644"
+        content: |
+          name: devops-security
+
+          networks:
+            {{ security_network }}:
+              external: true
+              name: {{ security_network }}
+
+          volumes:
+            vault-data:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ vault_data_dir }} }
+            consul-data:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ consul_data_dir }} }
+            keycloak-data:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ keycloak_data_dir }} }
+
+          services:
+            consul:
+              image: {{ consul_image }}
+              container_name: consul
+              restart: unless-stopped
+              ports:
+                - "{{ consul_port }}:8500"
+                - "{{ consul_dns_port }}:8600/udp"
+                - "8300:8300"
+                - "8301:8301"
+                - "8302:8302"
+              command: agent -dev -ui -client=0.0.0.0 -log-level=info
+              environment:
+                - CONSUL_BIND_INTERFACE=eth0
+              volumes:
+                - consul-data:/consul/data
+              networks:
+                - {{ security_network }}
+              mem_limit: 256m
+              healthcheck:
+                test: ["CMD", "consul", "members"]
+                interval: 30s
+                timeout: 10s
+                retries: 5
+                start_period: 15s
+              logging:
+                driver: json-file
+                options: { max-size: "10m", max-file: "3" }
+
+            vault:
+              image: {{ vault_image }}
+              container_name: vault
+              restart: unless-stopped
+              ports:
+                - "{{ vault_port }}:8200"
+                - "8201:8201"
+              environment:
+                - VAULT_DEV_ROOT_TOKEN_ID={{ vault_root_token }}
+                - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
+                - VAULT_ADDR=http://0.0.0.0:8200
+                - VAULT_TOKEN={{ vault_root_token }}
+              command: server -dev
+              cap_add:
+                - IPC_LOCK
+              volumes:
+                - vault-data:/vault/data
+                - {{ config_dir }}/vault:/vault/config:ro
+              networks:
+                - {{ security_network }}
+              mem_limit: 256m
+              healthcheck:
+                test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
+                interval: 30s
+                timeout: 10s
+                retries: 5
+                start_period: 20s
+              logging:
+                driver: json-file
+                options: { max-size: "10m", max-file: "3" }
+
+            keycloak:
+              image: {{ keycloak_image }}
+              container_name: keycloak
+              restart: unless-stopped
+              ports:
+                - "{{ keycloak_port }}:8080"
+              environment:
+                - KEYCLOAK_ADMIN={{ keycloak_admin_user }}
+                - KEYCLOAK_ADMIN_PASSWORD={{ keycloak_admin_password }}
+                - KC_HTTP_ENABLED=true
+                - KC_HEALTH_ENABLED=true
+                - KC_METRICS_ENABLED=true
+                - KC_LOG_LEVEL=info
+                - KC_DB=dev-file
+              command: start-dev
+              volumes:
+                - keycloak-data:/opt/keycloak/data
+              networks:
+                - {{ security_network }}
+              mem_limit: 1g
+              cpus: 1.0
+              healthcheck:
+                test: ["CMD", "curl", "-sf", "http://localhost:8080/health/ready"]
+                interval: 30s
+                timeout: 15s
+                retries: 10
+                start_period: 90s
+              logging:
+                driver: json-file
+                options: { max-size: "20m", max-file: "5" }
+
+    - name: Lancer la stack Security
+      command: >
+        docker compose -f {{ compose_dir }}/security.yml up -d --remove-orphans
+
+    - name: Attendre Consul
+      uri:
+        url: "http://localhost:{{ consul_port }}/v1/status/leader"
+        status_code: 200
+      register: consul_check
+      until: consul_check.status == 200
+      retries: 15
+      delay: 10
+      ignore_errors: true
+
+    - name: Attendre Vault
+      uri:
+        url: "http://localhost:{{ vault_port }}/v1/sys/health"
+        status_code: [200, 429, 472, 473, 501, 503]
+      register: vault_check
+      until: vault_check.status in [200, 429, 501, 503]
+      retries: 15
+      delay: 10
+      ignore_errors: true
+
+  post_tasks:
+    - name: Afficher le resume Security
+      debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════╗
+          ║       Stack Security deployee avec succes !             ║
+          ╠══════════════════════════════════════════════════════════╣
+          ║  Consul   : http://localhost:{{ consul_port }}                    ║
+          ║  Vault    : http://localhost:{{ vault_port }}                    ║
+          ║             Token root : {{ vault_root_token }}         ║
+          ║  Keycloak : http://localhost:{{ keycloak_port }}                  ║
+          ║             Admin: {{ keycloak_admin_user }} / {{ keycloak_admin_password }}  ║
+          ╚══════════════════════════════════════════════════════════╝

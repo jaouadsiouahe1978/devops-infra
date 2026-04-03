@@ -1,0 +1,372 @@
+---
+# security-scan.yml — Scan de securite avec Trivy sur les images Docker
+# Scan des vulnerabilites CVE, secrets hardcodes, et misconfigurations
+name: Security Scan (Trivy)
+
+on:
+  push:
+    branches: ["main", "master", "develop"]
+    paths:
+      - "docker/**"
+      - "Dockerfile*"
+      - "**/Dockerfile*"
+      - ".github/workflows/security-scan.yml"
+  pull_request:
+    branches: ["main", "master"]
+    paths:
+      - "docker/**"
+      - "Dockerfile*"
+  schedule:
+    # Scan quotidien a 6h UTC pour decouvrir les nouvelles CVE
+    - cron: "0 6 * * *"
+
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Image Docker a scanner (ex: nginx:latest)"
+        required: false
+        default: ""
+      severity:
+        description: "Severite minimum (UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL)"
+        required: false
+        default: "HIGH,CRITICAL"
+
+env:
+  TRIVY_VERSION: "0.50.0"
+  SEVERITY: "${{ github.event.inputs.severity || 'HIGH,CRITICAL' }}"
+  # Liste des images a scanner en permanence
+  MONITORED_IMAGES: |
+    prom/prometheus:v2.50.1
+    grafana/grafana:10.4.0
+    prom/alertmanager:v0.27.0
+    prom/node-exporter:v1.7.0
+    postgres:16-alpine
+    redis:7.2-alpine
+    nginx:1.25-alpine
+    portainer/portainer-ce:2.19.4
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 1 : Scanner les Dockerfiles
+  # ────────────────────────────────────────────────────────────────────────────
+  scan-dockerfiles:
+    name: Scan Dockerfiles
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Installer Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin v${TRIVY_VERSION}
+          trivy --version
+
+      - name: Scanner les Dockerfiles avec Trivy
+        run: |
+          echo "Recherche des Dockerfiles..."
+          DOCKERFILES=$(find . -name "Dockerfile*" -not -path "*/.git/*" 2>/dev/null)
+
+          if [ -z "$DOCKERFILES" ]; then
+            echo "Aucun Dockerfile trouve."
+            exit 0
+          fi
+
+          for dockerfile in $DOCKERFILES; do
+            echo ""
+            echo "=== Scan du Dockerfile : $dockerfile ==="
+            trivy config \
+              --severity "$SEVERITY" \
+              --format table \
+              --exit-code 0 \
+              "$dockerfile" 2>/dev/null || true
+          done
+
+      - name: Scanner les docker-compose
+        run: |
+          echo "Scan des fichiers docker-compose..."
+          for compose_file in $(find . -name "docker-compose*.yml" -o -name "*.compose.yml" 2>/dev/null | grep -v ".git"); do
+            echo ""
+            echo "=== Scan: $compose_file ==="
+            trivy config \
+              --severity "$SEVERITY" \
+              --format table \
+              --exit-code 0 \
+              "$compose_file" 2>/dev/null || true
+          done
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 2 : Scanner les images Docker principales
+  # ────────────────────────────────────────────────────────────────────────────
+  scan-images:
+    name: Scan Images Docker
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - "prom/prometheus:v2.50.1"
+          - "grafana/grafana:10.4.0"
+          - "postgres:16-alpine"
+          - "redis:7.2-alpine"
+          - "nginx:1.25-alpine"
+          - "portainer/portainer-ce:2.19.4"
+          - "prom/node-exporter:v1.7.0"
+          - "prom/alertmanager:v0.27.0"
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Installer Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin v${TRIVY_VERSION}
+
+      - name: Scanner l'image ${{ matrix.image }}
+        id: scan
+        run: |
+          IMAGE="${{ matrix.image }}"
+          IMAGE_SAFE=$(echo "$IMAGE" | tr ':/.' '---')
+          REPORT_FILE="trivy-report-${IMAGE_SAFE}.json"
+
+          echo "=== Scan de l'image: $IMAGE ==="
+
+          # Scan avec sortie JSON pour le rapport
+          trivy image \
+            --severity "$SEVERITY" \
+            --format json \
+            --output "$REPORT_FILE" \
+            --exit-code 0 \
+            --timeout 20m \
+            --ignore-unfixed \
+            "$IMAGE" 2>/dev/null || true
+
+          # Afficher le resume en table
+          trivy image \
+            --severity "$SEVERITY" \
+            --format table \
+            --exit-code 0 \
+            --timeout 20m \
+            --ignore-unfixed \
+            "$IMAGE" 2>/dev/null || true
+
+          # Compter les vulnerabilites
+          if command -v jq &>/dev/null && [ -f "$REPORT_FILE" ]; then
+            CRITICAL=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' "$REPORT_FILE" 2>/dev/null || echo 0)
+            HIGH=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="HIGH")] | length' "$REPORT_FILE" 2>/dev/null || echo 0)
+            echo "  CRITICAL: $CRITICAL | HIGH: $HIGH"
+            echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
+            echo "high=$HIGH" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Uploader le rapport JSON
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-report-${{ strategy.job-index }}
+          path: trivy-report-*.json
+          retention-days: 30
+
+      - name: Publier les resultats en SARIF (GitHub Security)
+        run: |
+          IMAGE="${{ matrix.image }}"
+          IMAGE_SAFE=$(echo "$IMAGE" | tr ':/.' '---')
+          SARIF_FILE="trivy-${IMAGE_SAFE}.sarif"
+
+          trivy image \
+            --severity "$SEVERITY" \
+            --format sarif \
+            --output "$SARIF_FILE" \
+            --exit-code 0 \
+            --timeout 20m \
+            --ignore-unfixed \
+            "$IMAGE" 2>/dev/null || true
+
+          echo "SARIF genere : $SARIF_FILE"
+        continue-on-error: true
+
+      - name: Upload SARIF vers GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-*.sarif"
+          category: "trivy-image-${{ strategy.job-index }}"
+        continue-on-error: true
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 3 : Scanner les secrets dans le code
+  # ────────────────────────────────────────────────────────────────────────────
+  scan-secrets:
+    name: Scan Secrets dans le code
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Installer Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin v${TRIVY_VERSION}
+
+      - name: Scanner les secrets dans le repo
+        run: |
+          echo "=== Scan des secrets et credentials dans le code ==="
+          trivy fs \
+            --scanners secret \
+            --format table \
+            --exit-code 0 \
+            --severity HIGH,CRITICAL \
+            . 2>/dev/null || true
+        continue-on-error: true
+
+      - name: Scanner les misconfigurations
+        run: |
+          echo "=== Scan des misconfigurations ==="
+          trivy fs \
+            --scanners misconfig \
+            --format table \
+            --exit-code 0 \
+            --severity "$SEVERITY" \
+            --include-non-failures \
+            . 2>/dev/null || true
+        continue-on-error: true
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 4 : Scanner les dependances (SCA)
+  # ────────────────────────────────────────────────────────────────────────────
+  scan-dependencies:
+    name: Scan Dependances (SCA)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Installer Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin v${TRIVY_VERSION}
+
+      - name: Scanner les dependances
+        run: |
+          echo "=== Scan Software Composition Analysis ==="
+          trivy fs \
+            --scanners vuln \
+            --format table \
+            --exit-code 0 \
+            --severity "$SEVERITY" \
+            --ignore-unfixed \
+            . 2>/dev/null || true
+
+      - name: Generer le rapport SBOM
+        run: |
+          echo "=== Generation du SBOM (Software Bill of Materials) ==="
+          trivy fs \
+            --format cyclonedx \
+            --output sbom.cyclonedx.json \
+            . 2>/dev/null || true
+
+          if [ -f sbom.cyclonedx.json ]; then
+            echo "SBOM genere : sbom.cyclonedx.json"
+            wc -c sbom.cyclonedx.json
+          fi
+        continue-on-error: true
+
+      - name: Uploader le SBOM
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cyclonedx.json
+          retention-days: 90
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 5 : Rapport de synthese de securite
+  # ────────────────────────────────────────────────────────────────────────────
+  security-report:
+    name: Rapport de securite
+    runs-on: ubuntu-22.04
+    needs: [scan-dockerfiles, scan-images, scan-secrets, scan-dependencies]
+    if: always()
+
+    steps:
+      - name: Telecharger les rapports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: trivy-report-*
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Installer jq
+        run: sudo apt-get install -y jq 2>/dev/null || true
+
+      - name: Consolider les resultats
+        run: |
+          TOTAL_CRIT=0
+          TOTAL_HIGH=0
+
+          for report in trivy-report-*.json; do
+            [ -f "$report" ] || continue
+            CRIT=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' "$report" 2>/dev/null || echo 0)
+            HIGH=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="HIGH")] | length' "$report" 2>/dev/null || echo 0)
+            TOTAL_CRIT=$((TOTAL_CRIT + CRIT))
+            TOTAL_HIGH=$((TOTAL_HIGH + HIGH))
+            echo "  $report: CRITICAL=$CRIT, HIGH=$HIGH"
+          done
+
+          echo ""
+          echo "=== BILAN SECURITE ==="
+          echo "Total CRITICAL : $TOTAL_CRIT"
+          echo "Total HIGH     : $TOTAL_HIGH"
+
+          # Ecrire le resume GitHub
+          {
+            echo "## Rapport de Securite Trivy"
+            echo ""
+            echo "| Scanner            | Statut |"
+            echo "|--------------------|--------|"
+            echo "| Dockerfiles        | ${{ needs.scan-dockerfiles.result }} |"
+            echo "| Images Docker      | ${{ needs.scan-images.result }} |"
+            echo "| Secrets            | ${{ needs.scan-secrets.result }} |"
+            echo "| Dependances (SCA)  | ${{ needs.scan-dependencies.result }} |"
+            echo ""
+            echo "### Vulnerabilites detectees (toutes images)"
+            echo ""
+            echo "| Severite  | Nombre |"
+            echo "|-----------|--------|"
+            echo "| CRITICAL  | $TOTAL_CRIT |"
+            echo "| HIGH      | $TOTAL_HIGH |"
+            echo ""
+            echo "> Les vulnerabilites dans les dependances systeme des images de base"
+            echo "> doivent etre traitees via des mises a jour regulieres des images."
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: Verifier le seuil critique
+        run: |
+          # Echouer si trop de vulnerabilites critiques non corriges
+          THRESHOLD=50
+          TOTAL_CRIT=0
+
+          for report in trivy-report-*.json; do
+            [ -f "$report" ] || continue
+            CRIT=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' "$report" 2>/dev/null || echo 0)
+            TOTAL_CRIT=$((TOTAL_CRIT + CRIT))
+          done
+
+          echo "Total vulnerabilites critiques : $TOTAL_CRIT (seuil: $THRESHOLD)"
+
+          if [ "$TOTAL_CRIT" -gt "$THRESHOLD" ]; then
+            echo "::error::Trop de vulnerabilites critiques detectees ($TOTAL_CRIT > $THRESHOLD)"
+            echo "Merci de mettre a jour les images ou d'exclure les faux positifs."
+            # exit 1  # Decommenter pour bloquer le merge
+          fi

@@ -1,0 +1,219 @@
+---
+# 08-install-messaging.yaml — Installation de la stack Messaging
+# Services : Kafka, RabbitMQ, Zookeeper
+# Usage: ansible-playbook -i inventory/hosts.ini playbooks/08-install-messaging.yaml
+- name: "[08] Install Messaging Stack — Kafka, RabbitMQ, Zookeeper"
+  hosts: all
+  become: false
+  gather_facts: true
+
+  vars:
+    infra_dir: "{{ ansible_env.HOME }}/devops-infra"
+    data_dir: "{{ infra_dir }}/data"
+    compose_dir: "{{ infra_dir }}/docker/compose"
+
+    # Zookeeper
+    zookeeper_image: "confluentinc/cp-zookeeper:7.6.0"
+    zookeeper_port: 2181
+    zookeeper_data_dir: "{{ data_dir }}/zookeeper"
+
+    # Kafka
+    kafka_image: "confluentinc/cp-kafka:7.6.0"
+    kafka_port: 9092
+    kafka_external_port: 29092
+    kafka_data_dir: "{{ data_dir }}/kafka"
+
+    # RabbitMQ
+    rabbitmq_image: "rabbitmq:3.13-management-alpine"
+    rabbitmq_port: 5672
+    rabbitmq_mgmt_port: 15672
+    rabbitmq_user: "devops"
+    rabbitmq_password: "DevOps2024!Rabbit"
+    rabbitmq_data_dir: "{{ data_dir }}/rabbitmq"
+
+    messaging_network: "devops-messaging"
+
+  pre_tasks:
+    - name: Verifier Docker
+      command: docker info
+      changed_when: false
+
+    - name: Creer les repertoires
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ zookeeper_data_dir }}/data"
+        - "{{ zookeeper_data_dir }}/log"
+        - "{{ kafka_data_dir }}"
+        - "{{ rabbitmq_data_dir }}"
+
+  tasks:
+    - name: Creer le reseau devops-messaging
+      command: docker network create --driver bridge {{ messaging_network }}
+      register: net
+      failed_when: net.rc != 0 and 'already exists' not in net.stderr
+      changed_when: net.rc == 0
+
+    - name: Deployer docker-compose Messaging
+      copy:
+        dest: "{{ compose_dir }}/messaging.yml"
+        mode: "0644"
+        content: |
+          name: devops-messaging
+
+          networks:
+            {{ messaging_network }}:
+              external: true
+              name: {{ messaging_network }}
+
+          volumes:
+            zookeeper-data:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ zookeeper_data_dir }}/data }
+            zookeeper-log:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ zookeeper_data_dir }}/log }
+            kafka-data:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ kafka_data_dir }} }
+            rabbitmq-data:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ rabbitmq_data_dir }} }
+
+          services:
+            zookeeper:
+              image: {{ zookeeper_image }}
+              container_name: zookeeper
+              restart: unless-stopped
+              ports:
+                - "{{ zookeeper_port }}:2181"
+              environment:
+                ZOOKEEPER_CLIENT_PORT: 2181
+                ZOOKEEPER_TICK_TIME: 2000
+                ZOOKEEPER_LOG4J_ROOT_LOGLEVEL: WARN
+              volumes:
+                - zookeeper-data:/var/lib/zookeeper/data
+                - zookeeper-log:/var/lib/zookeeper/log
+              networks:
+                - {{ messaging_network }}
+              mem_limit: 512m
+              healthcheck:
+                test: ["CMD", "nc", "-zv", "localhost", "2181"]
+                interval: 30s
+                timeout: 10s
+                retries: 5
+                start_period: 30s
+              logging:
+                driver: json-file
+                options: { max-size: "10m", max-file: "3" }
+
+            kafka:
+              image: {{ kafka_image }}
+              container_name: kafka
+              restart: unless-stopped
+              depends_on:
+                zookeeper:
+                  condition: service_healthy
+              ports:
+                - "{{ kafka_port }}:9092"
+                - "{{ kafka_external_port }}:29092"
+              environment:
+                KAFKA_BROKER_ID: 1
+                KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+                KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: >-
+                  PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+                KAFKA_ADVERTISED_LISTENERS: >-
+                  PLAINTEXT://kafka:{{ kafka_port }},PLAINTEXT_HOST://localhost:{{ kafka_external_port }}
+                KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+                KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+                KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+                KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+                KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+                KAFKA_LOG_RETENTION_HOURS: 24
+                KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
+              volumes:
+                - kafka-data:/var/lib/kafka/data
+              networks:
+                - {{ messaging_network }}
+              mem_limit: 1g
+              cpus: 1.0
+              healthcheck:
+                test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+                interval: 30s
+                timeout: 15s
+                retries: 5
+                start_period: 60s
+              logging:
+                driver: json-file
+                options: { max-size: "10m", max-file: "3" }
+
+            rabbitmq:
+              image: {{ rabbitmq_image }}
+              container_name: rabbitmq
+              restart: unless-stopped
+              ports:
+                - "{{ rabbitmq_port }}:5672"
+                - "{{ rabbitmq_mgmt_port }}:15672"
+              environment:
+                RABBITMQ_DEFAULT_USER: {{ rabbitmq_user }}
+                RABBITMQ_DEFAULT_PASS: {{ rabbitmq_password }}
+                RABBITMQ_DEFAULT_VHOST: devops
+              volumes:
+                - rabbitmq-data:/var/lib/rabbitmq
+              networks:
+                - {{ messaging_network }}
+              mem_limit: 512m
+              healthcheck:
+                test: ["CMD", "rabbitmq-diagnostics", "check_running"]
+                interval: 30s
+                timeout: 15s
+                retries: 5
+                start_period: 30s
+              logging:
+                driver: json-file
+                options: { max-size: "10m", max-file: "3" }
+
+    - name: Lancer la stack Messaging
+      command: docker compose -f {{ compose_dir }}/messaging.yml up -d --remove-orphans
+
+    - name: Attendre que Kafka soit pret
+      command: docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list
+      register: kafka_ready
+      until: kafka_ready.rc == 0
+      retries: 20
+      delay: 10
+      ignore_errors: true
+
+    - name: Creer les topics Kafka de base
+      command: >
+        docker exec kafka kafka-topics
+        --bootstrap-server localhost:9092
+        --create
+        --if-not-exists
+        --topic {{ item }}
+        --partitions 3
+        --replication-factor 1
+      loop:
+        - devops-events
+        - devops-logs
+        - devops-alerts
+        - devops-metrics
+      ignore_errors: true
+
+  post_tasks:
+    - name: Afficher le resume Messaging
+      debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║      Stack Messaging deployee avec succes !              ║
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  Zookeeper : localhost:{{ zookeeper_port }}                           ║
+          ║  Kafka     : localhost:{{ kafka_port }} (interne)                     ║
+          ║              localhost:{{ kafka_external_port }} (externe)              ║
+          ║  RabbitMQ  : amqp://localhost:{{ rabbitmq_port }}                     ║
+          ║              UI: http://localhost:{{ rabbitmq_mgmt_port }}             ║
+          ║              User: {{ rabbitmq_user }} / {{ rabbitmq_password }}   ║
+          ║  Topics crees: devops-events, devops-logs, devops-alerts  ║
+          ╚═══════════════════════════════════════════════════════════╝

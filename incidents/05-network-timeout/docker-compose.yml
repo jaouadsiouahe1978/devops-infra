@@ -4,20 +4,21 @@ services:
   slow-backend:
     image: python:3.11-alpine
     container_name: incident-slow-backend
-    command: >
-      python3 -c "
-      import http.server, time
-      class SlowHandler(http.server.BaseHTTPRequestHandler):
-          def do_GET(self):
-              print('[BACKEND] Request received, sleeping 30s...', flush=True)
-              time.sleep(30)
-              self.send_response(200)
-              self.end_headers()
-              self.wfile.write(b'OK')
-          def log_message(self, *args): pass
-      print('[BACKEND] Slow server starting on :8080')
-      http.server.HTTPServer(('0.0.0.0', 8080), SlowHandler).serve_forever()
-      "
+    command:
+      - python3
+      - -c
+      - |
+        import http.server, time
+        class SlowHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                print('[BACKEND] Request received, sleeping 30s...', flush=True)
+                time.sleep(30)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'OK')
+            def log_message(self, *args): pass
+        print('[BACKEND] Slow server starting on :8080', flush=True)
+        http.server.HTTPServer(('0.0.0.0', 8080), SlowHandler).serve_forever()
     ports:
       - "18080:8080"
 

@@ -1,0 +1,299 @@
+---
+# 12-install-loki.yaml — Installation de la stack Loki (Grafana Log Aggregation)
+# Services : Loki, Promtail
+# Usage: ansible-playbook -i inventory/hosts.ini playbooks/12-install-loki.yaml
+- name: "[12] Install Loki Stack — Loki & Promtail"
+  hosts: all
+  become: false
+  gather_facts: true
+
+  vars:
+    infra_dir: "{{ ansible_env.HOME }}/devops-infra"
+    data_dir: "{{ infra_dir }}/data"
+    compose_dir: "{{ infra_dir }}/docker/compose"
+    config_dir: "{{ infra_dir }}/config/loki"
+
+    loki_version: "2.9.5"
+    loki_port: 3100
+    loki_data_dir: "{{ data_dir }}/loki"
+    promtail_data_dir: "{{ data_dir }}/promtail"
+
+    monitoring_network: "devops-monitoring"
+
+  pre_tasks:
+    - name: Verifier Docker
+      command: docker info
+      changed_when: false
+
+    - name: Creer les repertoires
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0777"
+      loop:
+        - "{{ loki_data_dir }}"
+        - "{{ promtail_data_dir }}"
+        - "{{ config_dir }}"
+
+    - name: Creer la configuration Loki
+      copy:
+        dest: "{{ config_dir }}/loki.yml"
+        mode: "0644"
+        content: |
+          auth_enabled: false
+
+          server:
+            http_listen_port: 3100
+            grpc_listen_port: 9096
+            log_level: warn
+
+          common:
+            instance_addr: 127.0.0.1
+            path_prefix: /loki
+            storage:
+              filesystem:
+                chunks_directory: /loki/chunks
+                rules_directory: /loki/rules
+            replication_factor: 1
+            ring:
+              kvstore:
+                store: inmemory
+
+          query_range:
+            results_cache:
+              cache:
+                embedded_cache:
+                  enabled: true
+                  max_size_mb: 100
+
+          schema_config:
+            configs:
+              - from: 2020-10-24
+                store: tsdb
+                object_store: filesystem
+                schema: v12
+                index:
+                  prefix: index_
+                  period: 24h
+
+          ruler:
+            alertmanager_url: http://alertmanager:9093
+
+          storage_config:
+            tsdb_shipper:
+              active_index_directory: /loki/tsdb-index
+              cache_location: /loki/tsdb-cache
+              cache_ttl: 24h
+
+          compactor:
+            working_directory: /loki/compactor
+            shared_store: filesystem
+            retention_enabled: true
+            retention_delete_delay: 2h
+            retention_delete_worker_count: 150
+
+          limits_config:
+            retention_period: 15d
+            reject_old_samples: true
+            reject_old_samples_max_age: 168h
+            ingestion_rate_mb: 16
+            ingestion_burst_size_mb: 32
+
+          table_manager:
+            retention_deletes_enabled: false
+            retention_period: 0s
+
+          analytics:
+            reporting_enabled: false
+
+    - name: Creer la configuration Promtail
+      copy:
+        dest: "{{ config_dir }}/promtail.yml"
+        mode: "0644"
+        content: |
+          server:
+            http_listen_port: 9080
+            grpc_listen_port: 0
+            log_level: warn
+
+          positions:
+            filename: /tmp/positions.yaml
+
+          clients:
+            - url: http://loki:3100/loki/api/v1/push
+              tenant_id: devops-lab
+              backoff_config:
+                min_period: 500ms
+                max_period: 5m
+                max_retries: 10
+
+          scrape_configs:
+            # Logs Docker via socket
+            - job_name: docker
+              docker_sd_configs:
+                - host: unix:///var/run/docker.sock
+                  refresh_interval: 5s
+              relabel_configs:
+                - source_labels: ['__meta_docker_container_name']
+                  regex: '/(.*)'
+                  target_label: container
+                - source_labels: ['__meta_docker_container_log_stream']
+                  target_label: stream
+                - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
+                  target_label: service
+                - source_labels: ['__meta_docker_container_label_com_docker_compose_project']
+                  target_label: project
+              pipeline_stages:
+                - docker: {}
+                - json:
+                    expressions:
+                      level: level
+                      msg: msg
+                - labels:
+                    level:
+                - output:
+                    source: msg
+
+            # Logs systeme
+            - job_name: system
+              static_configs:
+                - targets:
+                    - localhost
+                  labels:
+                    job: varlogs
+                    host: "{{ ansible_hostname }}"
+                    __path__: /var/log/*.log
+              pipeline_stages:
+                - regex:
+                    expression: '(?P<level>ERROR|WARN|INFO|DEBUG)'
+                - labels:
+                    level:
+
+            # Logs Nginx
+            - job_name: nginx
+              static_configs:
+                - targets:
+                    - localhost
+                  labels:
+                    job: nginx
+                    host: "{{ ansible_hostname }}"
+                    __path__: /var/log/nginx/*.log
+              pipeline_stages:
+                - regex:
+                    expression: '(?P<method>GET|POST|PUT|DELETE|PATCH) (?P<path>[^ ]+) HTTP/[^ ]+" (?P<status>\d+)'
+                - labels:
+                    method:
+                    status:
+
+            # Logs DevOps infra
+            - job_name: devops-infra
+              static_configs:
+                - targets:
+                    - localhost
+                  labels:
+                    job: devops-infra
+                    host: "{{ ansible_hostname }}"
+                    __path__: "{{ infra_dir }}/logs/*.log"
+              pipeline_stages:
+                - multiline:
+                    firstline: '^\d{4}-\d{2}-\d{2}'
+                    max_wait_time: 3s
+
+  tasks:
+    - name: Verifier/Creer le reseau monitoring
+      command: docker network create --driver bridge {{ monitoring_network }}
+      register: net
+      failed_when: net.rc != 0 and 'already exists' not in net.stderr
+      changed_when: net.rc == 0
+
+    - name: Deployer docker-compose Loki
+      copy:
+        dest: "{{ compose_dir }}/loki.yml"
+        mode: "0644"
+        content: |
+          name: devops-loki
+
+          networks:
+            {{ monitoring_network }}:
+              external: true
+              name: {{ monitoring_network }}
+
+          volumes:
+            loki-data:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ loki_data_dir }} }
+            promtail-data:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ promtail_data_dir }} }
+
+          services:
+            loki:
+              image: grafana/loki:{{ loki_version }}
+              container_name: loki
+              restart: unless-stopped
+              ports:
+                - "{{ loki_port }}:3100"
+              command: -config.file=/etc/loki/loki.yml
+              volumes:
+                - {{ config_dir }}/loki.yml:/etc/loki/loki.yml:ro
+                - loki-data:/loki
+              networks:
+                - {{ monitoring_network }}
+              mem_limit: 512m
+              cpus: 0.5
+              healthcheck:
+                test: ["CMD", "wget", "-q", "--spider", "http://localhost:3100/ready"]
+                interval: 30s
+                timeout: 10s
+                retries: 5
+                start_period: 30s
+              logging:
+                driver: json-file
+                options: { max-size: "10m", max-file: "3" }
+
+            promtail:
+              image: grafana/promtail:{{ loki_version }}
+              container_name: promtail
+              restart: unless-stopped
+              command: -config.file=/etc/promtail/promtail.yml
+              volumes:
+                - {{ config_dir }}/promtail.yml:/etc/promtail/promtail.yml:ro
+                - promtail-data:/tmp
+                - /var/log:/var/log:ro
+                - /var/run/docker.sock:/var/run/docker.sock:ro
+                - {{ infra_dir }}/logs:/devops-logs:ro
+              networks:
+                - {{ monitoring_network }}
+              mem_limit: 128m
+              cpus: 0.2
+              logging:
+                driver: json-file
+                options: { max-size: "10m", max-file: "3" }
+
+    - name: Lancer la stack Loki
+      command: docker compose -f {{ compose_dir }}/loki.yml up -d --remove-orphans
+
+    - name: Attendre que Loki soit pret
+      uri:
+        url: "http://localhost:{{ loki_port }}/ready"
+        status_code: 200
+      register: loki_check
+      until: loki_check.status == 200
+      retries: 15
+      delay: 10
+      ignore_errors: true
+
+  post_tasks:
+    - name: Afficher le resume Loki
+      debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════╗
+          ║       Stack Loki deployee avec succes !                 ║
+          ╠══════════════════════════════════════════════════════════╣
+          ║  Loki     : http://localhost:{{ loki_port }}                      ║
+          ║  Promtail : actif (collecte les logs Docker et systeme)  ║
+          ║                                                          ║
+          ║  Configuration Grafana (datasource) :                    ║
+          ║    Type : Loki                                           ║
+          ║    URL  : http://loki:3100                               ║
+          ╚══════════════════════════════════════════════════════════╝

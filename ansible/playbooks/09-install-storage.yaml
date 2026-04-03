@@ -1,0 +1,204 @@
+---
+# 09-install-storage.yaml — Installation de la stack Storage
+# Services : MinIO, Nexus, Docker Registry
+# Usage: ansible-playbook -i inventory/hosts.ini playbooks/09-install-storage.yaml
+- name: "[09] Install Storage Stack — MinIO, Nexus, Docker Registry"
+  hosts: all
+  become: false
+  gather_facts: true
+
+  vars:
+    infra_dir: "{{ ansible_env.HOME }}/devops-infra"
+    data_dir: "{{ infra_dir }}/data"
+    compose_dir: "{{ infra_dir }}/docker/compose"
+
+    # MinIO
+    minio_image: "minio/minio:RELEASE.2024-03-10T02-53-48Z"
+    minio_port: 9001
+    minio_console_port: 9002
+    minio_root_user: "minioadmin"
+    minio_root_password: "DevOps2024!MinIO"
+    minio_data_dir: "{{ data_dir }}/minio"
+
+    # Nexus
+    nexus_image: "sonatype/nexus3:3.66.0"
+    nexus_port: 8084
+    nexus_docker_port: 8085
+    nexus_data_dir: "{{ data_dir }}/nexus"
+
+    # Docker Registry
+    registry_image: "registry:2.8"
+    registry_port: 5000
+    registry_data_dir: "{{ data_dir }}/registry"
+
+    storage_network: "devops-storage"
+
+  pre_tasks:
+    - name: Verifier Docker
+      command: docker info
+      changed_when: false
+
+    - name: Creer les repertoires
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ minio_data_dir }}"
+        - "{{ nexus_data_dir }}"
+        - "{{ registry_data_dir }}"
+
+    - name: Fixer les permissions Nexus (UID 200)
+      command: "chown -R 200:200 {{ nexus_data_dir }}"
+      ignore_errors: true
+
+  tasks:
+    - name: Creer le reseau devops-storage
+      command: docker network create --driver bridge {{ storage_network }}
+      register: net
+      failed_when: net.rc != 0 and 'already exists' not in net.stderr
+      changed_when: net.rc == 0
+
+    - name: Deployer docker-compose Storage
+      copy:
+        dest: "{{ compose_dir }}/storage.yml"
+        mode: "0644"
+        content: |
+          name: devops-storage
+
+          networks:
+            {{ storage_network }}:
+              external: true
+              name: {{ storage_network }}
+
+          volumes:
+            minio-data:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ minio_data_dir }} }
+            nexus-data:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ nexus_data_dir }} }
+            registry-data:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ registry_data_dir }} }
+
+          services:
+            minio:
+              image: {{ minio_image }}
+              container_name: minio
+              restart: unless-stopped
+              ports:
+                - "{{ minio_port }}:9000"
+                - "{{ minio_console_port }}:9001"
+              environment:
+                MINIO_ROOT_USER: {{ minio_root_user }}
+                MINIO_ROOT_PASSWORD: {{ minio_root_password }}
+                MINIO_BROWSER_REDIRECT_URL: http://localhost:{{ minio_console_port }}
+              command: server /data --console-address ":9001"
+              volumes:
+                - minio-data:/data
+              networks:
+                - {{ storage_network }}
+              mem_limit: 512m
+              healthcheck:
+                test: ["CMD", "mc", "ready", "local"]
+                interval: 30s
+                timeout: 10s
+                retries: 5
+                start_period: 20s
+              logging:
+                driver: json-file
+                options: { max-size: "10m", max-file: "3" }
+
+            nexus:
+              image: {{ nexus_image }}
+              container_name: nexus
+              restart: unless-stopped
+              ports:
+                - "{{ nexus_port }}:8081"
+                - "{{ nexus_docker_port }}:8085"
+              environment:
+                INSTALL4J_ADD_VM_PARAMS: >-
+                  -Xms512m -Xmx1g
+                  -XX:MaxDirectMemorySize=512m
+                  -Djava.util.prefs.userRoot=/nexus-data/javaprefs
+              volumes:
+                - nexus-data:/nexus-data
+              networks:
+                - {{ storage_network }}
+              mem_limit: 2g
+              cpus: 1.0
+              healthcheck:
+                test: ["CMD", "curl", "-sf", "http://localhost:8081/service/rest/v1/status"]
+                interval: 30s
+                timeout: 15s
+                retries: 10
+                start_period: 120s
+              logging:
+                driver: json-file
+                options: { max-size: "20m", max-file: "5" }
+
+            registry:
+              image: {{ registry_image }}
+              container_name: registry
+              restart: unless-stopped
+              ports:
+                - "{{ registry_port }}:5000"
+              environment:
+                REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY: /data
+                REGISTRY_HTTP_ADDR: "0.0.0.0:5000"
+                REGISTRY_LOG_LEVEL: info
+                REGISTRY_STORAGE_DELETE_ENABLED: "true"
+              volumes:
+                - registry-data:/data
+              networks:
+                - {{ storage_network }}
+              mem_limit: 256m
+              healthcheck:
+                test: ["CMD", "wget", "-q", "--spider", "http://localhost:5000/v2/"]
+                interval: 30s
+                timeout: 10s
+                retries: 5
+                start_period: 10s
+              logging:
+                driver: json-file
+                options: { max-size: "10m", max-file: "3" }
+
+    - name: Lancer la stack Storage
+      command: docker compose -f {{ compose_dir }}/storage.yml up -d --remove-orphans
+
+    - name: Attendre que MinIO soit pret
+      uri:
+        url: "http://localhost:{{ minio_port }}/minio/health/live"
+        status_code: 200
+      register: minio_check
+      until: minio_check.status == 200
+      retries: 15
+      delay: 10
+      ignore_errors: true
+
+    - name: Attendre que le Registry soit pret
+      uri:
+        url: "http://localhost:{{ registry_port }}/v2/"
+        status_code: 200
+      register: registry_check
+      until: registry_check.status == 200
+      retries: 10
+      delay: 5
+      ignore_errors: true
+
+  post_tasks:
+    - name: Afficher le resume Storage
+      debug:
+        msg: |
+          ╔════════════════════════════════════════════════════════╗
+          ║      Stack Storage deployee avec succes !             ║
+          ╠════════════════════════════════════════════════════════╣
+          ║  MinIO    : http://localhost:{{ minio_port }}  (API S3)       ║
+          ║  MinIO UI : http://localhost:{{ minio_console_port }}              ║
+          ║             User: {{ minio_root_user }} / {{ minio_root_password }}  ║
+          ║  Nexus    : http://localhost:{{ nexus_port }}             ║
+          ║             (mot de passe initial dans nexus-data/)    ║
+          ║  Registry : http://localhost:{{ registry_port }}            ║
+          ║             docker push localhost:{{ registry_port }}/image:tag  ║
+          ╚════════════════════════════════════════════════════════╝

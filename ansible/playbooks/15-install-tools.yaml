@@ -1,0 +1,269 @@
+---
+# 15-install-tools.yaml — Installation des outils DevOps complémentaires
+# Services : Portainer, pgAdmin, RedisInsight
+# Usage: ansible-playbook -i inventory/hosts.ini playbooks/15-install-tools.yaml
+- name: "[15] Install DevOps Tools — Portainer, pgAdmin, RedisInsight"
+  hosts: all
+  become: false
+  gather_facts: true
+
+  vars:
+    infra_dir: "{{ ansible_env.HOME }}/devops-infra"
+    data_dir: "{{ infra_dir }}/data"
+    compose_dir: "{{ infra_dir }}/docker/compose"
+
+    # Portainer (deja dans tools.yml, on peut le redefinir ici separement)
+    portainer_image: "portainer/portainer-ce:2.19.4"
+    portainer_port: 9000
+    portainer_https_port: 9443
+    portainer_data_dir: "{{ data_dir }}/portainer"
+
+    # pgAdmin
+    pgadmin_image: "dpage/pgadmin4:8.3"
+    pgadmin_port: 5050
+    pgadmin_email: "admin@devops.local"
+    pgadmin_password: "DevOps2024!"
+    pgadmin_data_dir: "{{ data_dir }}/pgadmin"
+
+    # RedisInsight
+    redisinsight_image: "redis/redisinsight:2.44"
+    redisinsight_port: 8001
+    redisinsight_data_dir: "{{ data_dir }}/redisinsight"
+
+    # Dashdot (dashboard systeme)
+    dashdot_image: "mauricenino/dashdot:latest"
+    dashdot_port: 8095
+
+    # Dozzle (log viewer Docker en temps reel)
+    dozzle_image: "amir20/dozzle:latest"
+    dozzle_port: 8096
+
+    tools_network: "devops-tools"
+
+  pre_tasks:
+    - name: Verifier Docker
+      command: docker info
+      changed_when: false
+
+    - name: Creer les repertoires
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ portainer_data_dir }}"
+        - "{{ pgadmin_data_dir }}"
+        - "{{ redisinsight_data_dir }}"
+
+    - name: Fixer les permissions pgAdmin
+      file:
+        path: "{{ pgadmin_data_dir }}"
+        state: directory
+        mode: "0777"
+
+  tasks:
+    - name: Creer le reseau devops-tools
+      command: docker network create --driver bridge {{ tools_network }}
+      register: net
+      failed_when: net.rc != 0 and 'already exists' not in net.stderr
+      changed_when: net.rc == 0
+
+    - name: Deployer docker-compose Tools
+      copy:
+        dest: "{{ compose_dir }}/tools-extended.yml"
+        mode: "0644"
+        content: |
+          name: devops-tools-extended
+
+          networks:
+            {{ tools_network }}:
+              external: true
+              name: {{ tools_network }}
+
+          volumes:
+            portainer-ext-data:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ portainer_data_dir }} }
+            pgadmin-ext-data:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ pgadmin_data_dir }} }
+            redisinsight-ext-data:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ redisinsight_data_dir }} }
+
+          services:
+            portainer:
+              image: {{ portainer_image }}
+              container_name: portainer
+              restart: unless-stopped
+              ports:
+                - "{{ portainer_port }}:9000"
+                - "{{ portainer_https_port }}:9443"
+              volumes:
+                - /var/run/docker.sock:/var/run/docker.sock
+                - portainer-ext-data:/data
+              networks:
+                - {{ tools_network }}
+              mem_limit: 256m
+              healthcheck:
+                test: ["CMD", "wget", "-q", "--spider", "--no-check-certificate",
+                       "https://localhost:9443/api/system/status"]
+                interval: 30s
+                timeout: 10s
+                retries: 5
+                start_period: 20s
+              logging:
+                driver: json-file
+                options: { max-size: "10m", max-file: "3" }
+
+            pgadmin:
+              image: {{ pgadmin_image }}
+              container_name: pgadmin
+              restart: unless-stopped
+              ports:
+                - "{{ pgadmin_port }}:80"
+              environment:
+                PGADMIN_DEFAULT_EMAIL: {{ pgadmin_email }}
+                PGADMIN_DEFAULT_PASSWORD: {{ pgadmin_password }}
+                PGADMIN_CONFIG_SERVER_MODE: "False"
+                PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+                GUNICORN_ACCESS_LOGFILE: /dev/null
+              volumes:
+                - pgadmin-ext-data:/var/lib/pgadmin
+              networks:
+                - {{ tools_network }}
+              mem_limit: 512m
+              extra_hosts:
+                - "host.docker.internal:host-gateway"
+              healthcheck:
+                test: ["CMD", "wget", "-q", "--spider", "http://localhost:80/misc/ping"]
+                interval: 30s
+                timeout: 10s
+                retries: 5
+                start_period: 30s
+              logging:
+                driver: json-file
+                options: { max-size: "10m", max-file: "3" }
+
+            redisinsight:
+              image: {{ redisinsight_image }}
+              container_name: redisinsight
+              restart: unless-stopped
+              ports:
+                - "{{ redisinsight_port }}:5540"
+              volumes:
+                - redisinsight-ext-data:/data
+              networks:
+                - {{ tools_network }}
+              mem_limit: 512m
+              extra_hosts:
+                - "host.docker.internal:host-gateway"
+              healthcheck:
+                test: ["CMD", "wget", "-q", "--spider", "http://localhost:5540/api/health"]
+                interval: 30s
+                timeout: 10s
+                retries: 5
+                start_period: 20s
+              logging:
+                driver: json-file
+                options: { max-size: "10m", max-file: "3" }
+
+            dashdot:
+              image: {{ dashdot_image }}
+              container_name: dashdot
+              restart: unless-stopped
+              ports:
+                - "{{ dashdot_port }}:3001"
+              privileged: true
+              volumes:
+                - /:/mnt/host:ro
+              networks:
+                - {{ tools_network }}
+              mem_limit: 256m
+              environment:
+                DASHDOT_ENABLE_CPU_TEMPS: "true"
+                DASHDOT_SHOW_HOST: "true"
+                DASHDOT_PAGE_TITLE: DevOps Lab
+              healthcheck:
+                test: ["CMD", "wget", "-q", "--spider", "http://localhost:3001"]
+                interval: 30s
+                timeout: 10s
+                retries: 5
+                start_period: 15s
+              logging:
+                driver: json-file
+                options: { max-size: "5m", max-file: "3" }
+
+            dozzle:
+              image: {{ dozzle_image }}
+              container_name: dozzle
+              restart: unless-stopped
+              ports:
+                - "{{ dozzle_port }}:8080"
+              volumes:
+                - /var/run/docker.sock:/var/run/docker.sock:ro
+              networks:
+                - {{ tools_network }}
+              mem_limit: 128m
+              environment:
+                DOZZLE_LEVEL: info
+                DOZZLE_TAILSIZE: 300
+              healthcheck:
+                test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/healthcheck"]
+                interval: 30s
+                timeout: 10s
+                retries: 5
+                start_period: 10s
+              logging:
+                driver: json-file
+                options: { max-size: "5m", max-file: "3" }
+
+    - name: Lancer la stack Tools
+      command: >
+        docker compose -f {{ compose_dir }}/tools-extended.yml up -d --remove-orphans
+
+    - name: Attendre que Portainer soit pret
+      uri:
+        url: "http://localhost:{{ portainer_port }}"
+        status_code: 200
+      register: portainer_check
+      until: portainer_check.status == 200
+      retries: 15
+      delay: 10
+      ignore_errors: true
+
+    - name: Attendre que pgAdmin soit pret
+      uri:
+        url: "http://localhost:{{ pgadmin_port }}/misc/ping"
+        status_code: 200
+      register: pgadmin_check
+      until: pgadmin_check.status == 200
+      retries: 15
+      delay: 10
+      ignore_errors: true
+
+    - name: Attendre que RedisInsight soit pret
+      uri:
+        url: "http://localhost:{{ redisinsight_port }}/api/health"
+        status_code: 200
+      register: ri_check
+      until: ri_check.status == 200
+      retries: 15
+      delay: 10
+      ignore_errors: true
+
+  post_tasks:
+    - name: Afficher le resume Tools
+      debug:
+        msg: |
+          ╔════════════════════════════════════════════════════════════════╗
+          ║       Stack Tools deployee avec succes !                     ║
+          ╠════════════════════════════════════════════════════════════════╣
+          ║  Portainer    : http://localhost:{{ portainer_port }}                     ║
+          ║                 HTTPS: https://localhost:{{ portainer_https_port }}         ║
+          ║  pgAdmin      : http://localhost:{{ pgadmin_port }}                     ║
+          ║                 Login: {{ pgadmin_email }} / {{ pgadmin_password }}   ║
+          ║  RedisInsight : http://localhost:{{ redisinsight_port }}                  ║
+          ║  Dashdot      : http://localhost:{{ dashdot_port }} (dashboard systeme)   ║
+          ║  Dozzle       : http://localhost:{{ dozzle_port }} (logs Docker live)     ║
+          ╚════════════════════════════════════════════════════════════════╝

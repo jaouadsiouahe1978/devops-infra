@@ -1,0 +1,198 @@
+---
+# 06-install-cicd.yaml — Installation de la stack CI/CD
+# Services : Jenkins, Gitea
+# Usage: ansible-playbook -i inventory/hosts.ini playbooks/06-install-cicd.yaml
+- name: "[06] Install CI/CD Stack — Jenkins & Gitea"
+  hosts: all
+  become: false
+  gather_facts: true
+
+  vars:
+    infra_dir: "{{ ansible_env.HOME }}/devops-infra"
+    data_dir: "{{ infra_dir }}/data"
+    compose_dir: "{{ infra_dir }}/docker/compose"
+
+    # Jenkins
+    jenkins_image: "jenkins/jenkins:lts-jdk17"
+    jenkins_port: 8081
+    jenkins_agent_port: 50000
+    jenkins_data_dir: "{{ data_dir }}/jenkins"
+
+    # Gitea
+    gitea_image: "gitea/gitea:1.21"
+    gitea_port: 3001
+    gitea_ssh_port: 2222
+    gitea_data_dir: "{{ data_dir }}/gitea"
+    gitea_db_dir: "{{ data_dir }}/gitea-db"
+
+    # Reseau Docker
+    cicd_network: "devops-cicd"
+
+  pre_tasks:
+    - name: Verifier que Docker est accessible
+      command: docker info
+      changed_when: false
+      register: docker_check
+      failed_when: docker_check.rc != 0
+
+    - name: Creer les repertoires de donnees
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ jenkins_data_dir }}"
+        - "{{ gitea_data_dir }}"
+        - "{{ gitea_db_dir }}"
+        - "{{ compose_dir }}"
+
+  tasks:
+    # ─── Reseau Docker ──────────────────────────────────────────────────────
+    - name: Creer le reseau Docker devops-cicd
+      command: docker network create --driver bridge {{ cicd_network }}
+      register: network_result
+      failed_when: >
+        network_result.rc != 0 and
+        'already exists' not in network_result.stderr
+      changed_when: network_result.rc == 0
+
+    # ─── Fichier docker-compose CI/CD ────────────────────────────────────────
+    - name: Deployer le fichier docker-compose CI/CD
+      copy:
+        dest: "{{ compose_dir }}/cicd.yml"
+        mode: "0644"
+        content: |
+          name: devops-cicd
+
+          networks:
+            {{ cicd_network }}:
+              external: true
+              name: {{ cicd_network }}
+
+          volumes:
+            jenkins-data:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: {{ jenkins_data_dir }}
+            gitea-data:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: {{ gitea_data_dir }}
+            gitea-db-data:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: {{ gitea_db_dir }}
+
+          services:
+            jenkins:
+              image: {{ jenkins_image }}
+              container_name: jenkins
+              restart: unless-stopped
+              ports:
+                - "{{ jenkins_port }}:8080"
+                - "{{ jenkins_agent_port }}:50000"
+              environment:
+                - JAVA_OPTS=-Djenkins.install.runSetupWizard=false -Xmx1g
+                - JENKINS_OPTS=--prefix=/
+              volumes:
+                - jenkins-data:/var/jenkins_home
+                - /var/run/docker.sock:/var/run/docker.sock
+              networks:
+                - {{ cicd_network }}
+              mem_limit: 1536m
+              cpus: 1.0
+              healthcheck:
+                test: ["CMD", "curl", "-sf", "http://localhost:8080/login"]
+                interval: 30s
+                timeout: 15s
+                retries: 5
+                start_period: 90s
+              logging:
+                driver: json-file
+                options:
+                  max-size: "20m"
+                  max-file: "5"
+
+            gitea:
+              image: {{ gitea_image }}
+              container_name: gitea
+              restart: unless-stopped
+              ports:
+                - "{{ gitea_port }}:3000"
+                - "{{ gitea_ssh_port }}:22"
+              environment:
+                - USER_UID=1000
+                - USER_GID=1000
+                - GITEA__database__DB_TYPE=sqlite3
+                - GITEA__database__PATH=/data/gitea/gitea.db
+                - GITEA__server__DOMAIN=localhost
+                - GITEA__server__ROOT_URL=http://localhost:{{ gitea_port }}/
+                - GITEA__server__SSH_DOMAIN=localhost
+                - GITEA__server__SSH_PORT={{ gitea_ssh_port }}
+                - GITEA__service__DISABLE_REGISTRATION=false
+                - GITEA__log__LEVEL=Info
+              volumes:
+                - gitea-data:/data
+              networks:
+                - {{ cicd_network }}
+              mem_limit: 512m
+              cpus: 0.5
+              healthcheck:
+                test: ["CMD", "curl", "-sf", "http://localhost:3000/api/healthz"]
+                interval: 30s
+                timeout: 10s
+                retries: 5
+                start_period: 30s
+              logging:
+                driver: json-file
+                options:
+                  max-size: "10m"
+                  max-file: "3"
+
+    # ─── Lancement de la stack ────────────────────────────────────────────────
+    - name: Lancer la stack CI/CD avec docker compose
+      command: >
+        docker compose -f {{ compose_dir }}/cicd.yml up -d --remove-orphans
+      register: compose_up
+      changed_when: "'Started' in compose_up.stdout or 'Created' in compose_up.stdout"
+
+    # ─── Verification des services ────────────────────────────────────────────
+    - name: Attendre que Jenkins soit disponible
+      uri:
+        url: "http://localhost:{{ jenkins_port }}/login"
+        method: GET
+        status_code: [200, 403]
+      register: jenkins_check
+      until: jenkins_check.status in [200, 403]
+      retries: 20
+      delay: 15
+      ignore_errors: true
+
+    - name: Attendre que Gitea soit disponible
+      uri:
+        url: "http://localhost:{{ gitea_port }}/api/healthz"
+        method: GET
+        status_code: 200
+      register: gitea_check
+      until: gitea_check.status == 200
+      retries: 15
+      delay: 10
+      ignore_errors: true
+
+  post_tasks:
+    - name: Afficher le resume CI/CD
+      debug:
+        msg: |
+          ╔═════════════════════════════════════════════════════╗
+          ║      Stack CI/CD deployee avec succes !             ║
+          ╠═════════════════════════════════════════════════════╣
+          ║  Jenkins  : http://localhost:{{ jenkins_port }}              ║
+          ║  Gitea    : http://localhost:{{ gitea_port }}               ║
+          ║             SSH: localhost:{{ gitea_ssh_port }}             ║
+          ╚═════════════════════════════════════════════════════╝

@@ -1,0 +1,216 @@
+---
+# 13-install-sonarqube.yaml — Installation de SonarQube (Analyse de code)
+# Usage: ansible-playbook -i inventory/hosts.ini playbooks/13-install-sonarqube.yaml
+- name: "[13] Install SonarQube — Code Quality & Security Analysis"
+  hosts: all
+  become: false
+  gather_facts: true
+
+  vars:
+    infra_dir: "{{ ansible_env.HOME }}/devops-infra"
+    data_dir: "{{ infra_dir }}/data"
+    compose_dir: "{{ infra_dir }}/docker/compose"
+
+    sonar_image: "sonarqube:10.4-community"
+    sonar_port: 9000
+    sonar_data_dir: "{{ data_dir }}/sonarqube"
+
+    sonar_db_image: "postgres:15-alpine"
+    sonar_db_user: "sonar"
+    sonar_db_password: "DevOps2024!Sonar"
+    sonar_db_name: "sonarqube"
+    sonar_db_data_dir: "{{ data_dir }}/sonarqube-db"
+
+    sonar_network: "devops-sonar"
+
+  pre_tasks:
+    - name: Verifier Docker
+      command: docker info
+      changed_when: false
+
+    - name: Verifier vm.max_map_count
+      command: sysctl -n vm.max_map_count
+      register: max_map_count
+      changed_when: false
+      ignore_errors: true
+
+    - name: Augmenter vm.max_map_count
+      command: sysctl -w vm.max_map_count=524288
+      when: max_map_count.stdout | int < 524288
+      ignore_errors: true
+
+    - name: Verifier fs.file-max
+      command: sysctl -n fs.file-max
+      register: file_max
+      changed_when: false
+      ignore_errors: true
+
+    - name: Augmenter fs.file-max
+      command: sysctl -w fs.file-max=131072
+      when: file_max.stdout | int < 131072
+      ignore_errors: true
+
+    - name: Creer les repertoires SonarQube
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0777"
+      loop:
+        - "{{ sonar_data_dir }}/data"
+        - "{{ sonar_data_dir }}/extensions"
+        - "{{ sonar_data_dir }}/logs"
+        - "{{ sonar_data_dir }}/temp"
+        - "{{ sonar_db_data_dir }}"
+
+  tasks:
+    - name: Creer le reseau devops-sonar
+      command: docker network create --driver bridge {{ sonar_network }}
+      register: net
+      failed_when: net.rc != 0 and 'already exists' not in net.stderr
+      changed_when: net.rc == 0
+
+    - name: Deployer docker-compose SonarQube
+      copy:
+        dest: "{{ compose_dir }}/sonarqube.yml"
+        mode: "0644"
+        content: |
+          name: devops-sonarqube
+
+          networks:
+            {{ sonar_network }}:
+              external: true
+              name: {{ sonar_network }}
+
+          volumes:
+            sonar-data:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ sonar_data_dir }}/data }
+            sonar-extensions:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ sonar_data_dir }}/extensions }
+            sonar-logs:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ sonar_data_dir }}/logs }
+            sonar-temp:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ sonar_data_dir }}/temp }
+            sonar-db:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ sonar_db_data_dir }} }
+
+          services:
+            sonarqube-db:
+              image: {{ sonar_db_image }}
+              container_name: sonarqube-db
+              restart: unless-stopped
+              environment:
+                POSTGRES_USER: {{ sonar_db_user }}
+                POSTGRES_PASSWORD: {{ sonar_db_password }}
+                POSTGRES_DB: {{ sonar_db_name }}
+              volumes:
+                - sonar-db:/var/lib/postgresql/data
+              networks:
+                - {{ sonar_network }}
+              mem_limit: 512m
+              healthcheck:
+                test: ["CMD-SHELL", "pg_isready -U {{ sonar_db_user }} -d {{ sonar_db_name }}"]
+                interval: 10s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              logging:
+                driver: json-file
+                options: { max-size: "10m", max-file: "3" }
+
+            sonarqube:
+              image: {{ sonar_image }}
+              container_name: sonarqube
+              restart: unless-stopped
+              depends_on:
+                sonarqube-db:
+                  condition: service_healthy
+              ports:
+                - "{{ sonar_port }}:9000"
+              environment:
+                SONAR_JDBC_URL: jdbc:postgresql://sonarqube-db:5432/{{ sonar_db_name }}
+                SONAR_JDBC_USERNAME: {{ sonar_db_user }}
+                SONAR_JDBC_PASSWORD: {{ sonar_db_password }}
+                SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true"
+                SONAR_WEB_HOST: "0.0.0.0"
+                SONAR_WEB_PORT: 9000
+                SONAR_LOG_LEVEL: WARN
+              volumes:
+                - sonar-data:/opt/sonarqube/data
+                - sonar-extensions:/opt/sonarqube/extensions
+                - sonar-logs:/opt/sonarqube/logs
+                - sonar-temp:/opt/sonarqube/temp
+              networks:
+                - {{ sonar_network }}
+              mem_limit: 2g
+              cpus: 1.5
+              ulimits:
+                memlock:
+                  soft: -1
+                  hard: -1
+                nofile:
+                  soft: 65536
+                  hard: 65536
+              healthcheck:
+                test: ["CMD", "curl", "-sf", "http://localhost:9000/api/system/status"]
+                interval: 30s
+                timeout: 15s
+                retries: 15
+                start_period: 120s
+              logging:
+                driver: json-file
+                options: { max-size: "20m", max-file: "5" }
+
+    - name: Lancer SonarQube
+      command: docker compose -f {{ compose_dir }}/sonarqube.yml up -d --remove-orphans
+
+    - name: Attendre que SonarQube soit pret (peut prendre 2 min)
+      uri:
+        url: "http://localhost:{{ sonar_port }}/api/system/status"
+        method: GET
+        user: admin
+        password: admin
+        force_basic_auth: true
+        status_code: 200
+        return_content: true
+      register: sonar_status
+      until: >
+        sonar_status.status == 200 and
+        'UP' in sonar_status.content
+      retries: 30
+      delay: 15
+      ignore_errors: true
+
+    - name: Creer le projet de demo dans SonarQube
+      uri:
+        url: "http://localhost:{{ sonar_port }}/api/projects/create"
+        method: POST
+        user: admin
+        password: admin
+        force_basic_auth: true
+        body_format: form-urlencoded
+        body:
+          name: DevOps Lab Demo
+          project: devops-lab-demo
+          visibility: public
+        status_code: [200, 400]
+      ignore_errors: true
+
+  post_tasks:
+    - name: Afficher le resume SonarQube
+      debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║       SonarQube deploye avec succes !                   ║
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  URL     : http://localhost:{{ sonar_port }}                       ║
+          ║  Login   : admin / admin (changer au premier login)     ║
+          ║  DB      : PostgreSQL (sonarqube-db container)          ║
+          ║                                                          ║
+          ║  Scanner : sonar-scanner -Dsonar.host.url=              ║
+          ║              http://localhost:{{ sonar_port }}                     ║
+          ╚═══════════════════════════════════════════════════════════╝

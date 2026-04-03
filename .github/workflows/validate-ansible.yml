@@ -1,0 +1,229 @@
+---
+# validate-ansible.yml — Lint et validation des playbooks Ansible
+# Declenche sur chaque push/PR modifiant les fichiers ansible/
+name: Validate Ansible Playbooks
+
+on:
+  push:
+    branches: ["main", "master", "develop"]
+    paths:
+      - "ansible/**"
+      - ".github/workflows/validate-ansible.yml"
+  pull_request:
+    branches: ["main", "master"]
+    paths:
+      - "ansible/**"
+
+  # Permettre le declenchement manuel
+  workflow_dispatch:
+
+env:
+  ANSIBLE_FORCE_COLOR: "1"
+  ANSIBLE_PYTHON_INTERPRETER: "auto_silent"
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 1 : Lint avec ansible-lint
+  # ────────────────────────────────────────────────────────────────────────────
+  ansible-lint:
+    name: Ansible Lint
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configurer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Installer ansible-lint et dependances
+        run: |
+          pip install --upgrade pip
+          pip install \
+            ansible-core>=2.15 \
+            ansible-lint>=6.22 \
+            yamllint>=1.33 \
+            molecule>=6.0 \
+            jmespath
+
+      - name: Verifier la version d'ansible-lint
+        run: ansible-lint --version
+
+      - name: Linter les playbooks Ansible
+        run: |
+          cd ansible
+          ansible-lint playbooks/ \
+            --profile production \
+            --exclude roles/external/ \
+            -x no-free-form,command-instead-of-module \
+            || true
+        continue-on-error: false
+
+      - name: Lint YAML (yamllint)
+        run: |
+          yamllint -d '{
+            extends: default,
+            rules: {
+              line-length: {max: 120},
+              truthy: disable,
+              comments: {min-spaces-before-comment: 1}
+            }
+          }' ansible/playbooks/ ansible/roles/ ansible/inventory/ 2>/dev/null || true
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 2 : Validation syntaxique des playbooks
+  # ────────────────────────────────────────────────────────────────────────────
+  syntax-check:
+    name: Syntax Check
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    needs: ansible-lint
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Configurer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Installer Ansible
+        run: pip install ansible-core>=2.15
+
+      - name: Verification syntaxique de tous les playbooks
+        run: |
+          echo "Verification syntaxique des playbooks..."
+          ERRORS=0
+          for playbook in ansible/playbooks/*.yaml ansible/playbooks/*.yml; do
+            [ -f "$playbook" ] || continue
+            echo -n "  Checking $playbook... "
+            if ansible-playbook --syntax-check \
+                -i ansible/inventory/hosts.ini \
+                "$playbook" 2>&1; then
+              echo "OK"
+            else
+              echo "ECHEC"
+              ERRORS=$((ERRORS + 1))
+            fi
+          done
+
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "::error::$ERRORS playbook(s) avec des erreurs de syntaxe"
+            exit 1
+          fi
+          echo "Tous les playbooks sont syntaxiquement corrects."
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 3 : Validation des variables et templates Jinja2
+  # ────────────────────────────────────────────────────────────────────────────
+  validate-vars:
+    name: Validate Variables & Templates
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    needs: syntax-check
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Configurer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Installer les dependances
+        run: pip install ansible-core>=2.15 jinja2>=3.0
+
+      - name: Verifier les fichiers de variables
+        run: |
+          echo "Verification des fichiers de variables..."
+          python3 - <<'PYEOF'
+          import yaml
+          import sys
+          import os
+          import glob
+
+          errors = []
+          files_checked = 0
+
+          # Verifier tous les fichiers YAML des variables
+          patterns = [
+            "ansible/group_vars/**/*.yml",
+            "ansible/host_vars/**/*.yml",
+            "ansible/roles/*/defaults/main.yml",
+            "ansible/roles/*/vars/main.yml",
+          ]
+
+          for pattern in patterns:
+            for f in glob.glob(pattern, recursive=True):
+              try:
+                with open(f) as fh:
+                  yaml.safe_load(fh)
+                  files_checked += 1
+              except yaml.YAMLError as e:
+                errors.append(f"YAML invalide dans {f}: {e}")
+
+          if errors:
+            for err in errors:
+              print(f"::error::{err}")
+            sys.exit(1)
+          print(f"OK - {files_checked} fichiers de variables verifies.")
+          PYEOF
+
+      - name: Verifier la structure des roles
+        run: |
+          echo "Verification de la structure des roles Ansible..."
+          for role_dir in ansible/roles/*/; do
+            role=$(basename "$role_dir")
+            # Verifier les repertoires obligatoires
+            for required_dir in tasks; do
+              if [ ! -d "${role_dir}${required_dir}" ]; then
+                echo "::warning::Role '$role' manque le repertoire '$required_dir'"
+              fi
+            done
+            # Verifier le fichier tasks/main.yml
+            if [ ! -f "${role_dir}tasks/main.yml" ]; then
+              echo "::warning::Role '$role' manque tasks/main.yml"
+            fi
+          done
+          echo "Verification des roles terminee."
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 4 : Rapport de synthese
+  # ────────────────────────────────────────────────────────────────────────────
+  report:
+    name: Rapport de validation
+    runs-on: ubuntu-22.04
+    needs: [ansible-lint, syntax-check, validate-vars]
+    if: always()
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compter les playbooks
+        id: count
+        run: |
+          count=$(find ansible/playbooks -name "*.yml" -o -name "*.yaml" 2>/dev/null | wc -l)
+          roles=$(find ansible/roles -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l)
+          echo "playbooks=$count" >> $GITHUB_OUTPUT
+          echo "roles=$roles" >> $GITHUB_OUTPUT
+
+      - name: Afficher le rapport
+        run: |
+          echo "## Rapport de validation Ansible"                    >> $GITHUB_STEP_SUMMARY
+          echo ""                                                     >> $GITHUB_STEP_SUMMARY
+          echo "| Metrique          | Valeur |"                      >> $GITHUB_STEP_SUMMARY
+          echo "|--------------------|--------|"                     >> $GITHUB_STEP_SUMMARY
+          echo "| Playbooks          | ${{ steps.count.outputs.playbooks }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Roles              | ${{ steps.count.outputs.roles }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Lint               | ${{ needs.ansible-lint.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Syntax Check       | ${{ needs.syntax-check.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Variables          | ${{ needs.validate-vars.result }} |" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,194 @@
+---
+# 14-install-etcd.yaml — Installation de etcd (Distributed Key-Value Store)
+# Usage: ansible-playbook -i inventory/hosts.ini playbooks/14-install-etcd.yaml
+- name: "[14] Install etcd — Distributed Key-Value Store"
+  hosts: all
+  become: false
+  gather_facts: true
+
+  vars:
+    infra_dir: "{{ ansible_env.HOME }}/devops-infra"
+    data_dir: "{{ infra_dir }}/data"
+    compose_dir: "{{ infra_dir }}/docker/compose"
+    config_dir: "{{ infra_dir }}/config/etcd"
+
+    etcd_image: "quay.io/coreos/etcd:v3.5.12"
+    etcd_client_port: 2379
+    etcd_peer_port: 2380
+    etcd_data_dir: "{{ data_dir }}/etcd"
+
+    # etcd-browser (UI web)
+    etcd_browser_image: "buddho/etcd-browser:latest"
+    etcd_browser_port: 2381
+
+    etcd_network: "devops-etcd"
+
+  pre_tasks:
+    - name: Verifier Docker
+      command: docker info
+      changed_when: false
+
+    - name: Creer les repertoires
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0777"
+      loop:
+        - "{{ etcd_data_dir }}"
+        - "{{ config_dir }}"
+
+    - name: Creer le fichier de configuration etcd
+      copy:
+        dest: "{{ config_dir }}/etcd.conf.yml"
+        mode: "0644"
+        content: |
+          # etcd configuration file
+          name: 'devops-etcd'
+          data-dir: /etcd-data
+          listen-client-urls: 'http://0.0.0.0:2379'
+          advertise-client-urls: 'http://0.0.0.0:2379'
+          listen-peer-urls: 'http://0.0.0.0:2380'
+          initial-advertise-peer-urls: 'http://0.0.0.0:2380'
+          initial-cluster: 'devops-etcd=http://0.0.0.0:2380'
+          initial-cluster-token: 'devops-cluster-token'
+          initial-cluster-state: 'new'
+          log-level: 'warn'
+          auto-compaction-retention: '1'
+          auto-compaction-mode: 'periodic'
+          quota-backend-bytes: 8589934592
+          snapshot-count: 5000
+
+  tasks:
+    - name: Creer le reseau devops-etcd
+      command: docker network create --driver bridge {{ etcd_network }}
+      register: net
+      failed_when: net.rc != 0 and 'already exists' not in net.stderr
+      changed_when: net.rc == 0
+
+    - name: Deployer docker-compose etcd
+      copy:
+        dest: "{{ compose_dir }}/etcd.yml"
+        mode: "0644"
+        content: |
+          name: devops-etcd
+
+          networks:
+            {{ etcd_network }}:
+              external: true
+              name: {{ etcd_network }}
+
+          volumes:
+            etcd-data:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ etcd_data_dir }} }
+
+          services:
+            etcd:
+              image: {{ etcd_image }}
+              container_name: etcd
+              restart: unless-stopped
+              ports:
+                - "{{ etcd_client_port }}:2379"
+                - "{{ etcd_peer_port }}:2380"
+              environment:
+                ETCD_NAME: devops-etcd
+                ETCD_DATA_DIR: /etcd-data
+                ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+                ETCD_ADVERTISE_CLIENT_URLS: http://localhost:{{ etcd_client_port }}
+                ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+                ETCD_INITIAL_ADVERTISE_PEER_URLS: http://localhost:{{ etcd_peer_port }}
+                ETCD_INITIAL_CLUSTER: devops-etcd=http://localhost:{{ etcd_peer_port }}
+                ETCD_INITIAL_CLUSTER_TOKEN: devops-cluster
+                ETCD_INITIAL_CLUSTER_STATE: new
+                ETCD_LOG_LEVEL: warn
+                ETCD_AUTO_COMPACTION_RETENTION: "1"
+                ETCD_AUTO_COMPACTION_MODE: periodic
+                ETCD_QUOTA_BACKEND_BYTES: "8589934592"
+                ETCD_SNAPSHOT_COUNT: "5000"
+                ALLOW_NONE_AUTHENTICATION: "yes"
+              command: >
+                etcd
+                --name devops-etcd
+                --data-dir /etcd-data
+                --listen-client-urls http://0.0.0.0:2379
+                --advertise-client-urls http://localhost:2379
+                --listen-peer-urls http://0.0.0.0:2380
+                --initial-advertise-peer-urls http://localhost:2380
+                --initial-cluster devops-etcd=http://localhost:2380
+                --initial-cluster-token devops-cluster
+                --initial-cluster-state new
+                --log-level warn
+              volumes:
+                - etcd-data:/etcd-data
+              networks:
+                - {{ etcd_network }}
+              mem_limit: 512m
+              cpus: 0.5
+              healthcheck:
+                test: ["CMD", "etcdctl", "endpoint", "health",
+                       "--endpoints=http://localhost:2379"]
+                interval: 30s
+                timeout: 10s
+                retries: 5
+                start_period: 20s
+              logging:
+                driver: json-file
+                options: { max-size: "10m", max-file: "3" }
+
+            etcd-browser:
+              image: nikfoundas/etcd-keeper:latest
+              container_name: etcd-browser
+              restart: unless-stopped
+              ports:
+                - "{{ etcd_browser_port }}:2381"
+              environment:
+                ETCD_ENDPOINT: http://etcd:2379
+              depends_on:
+                - etcd
+              networks:
+                - {{ etcd_network }}
+              mem_limit: 64m
+              logging:
+                driver: json-file
+                options: { max-size: "5m", max-file: "3" }
+
+    - name: Lancer etcd
+      command: docker compose -f {{ compose_dir }}/etcd.yml up -d --remove-orphans
+
+    - name: Attendre qu'etcd soit pret
+      command: docker exec etcd etcdctl endpoint health --endpoints=http://localhost:2379
+      register: etcd_ready
+      until: etcd_ready.rc == 0
+      retries: 15
+      delay: 5
+      ignore_errors: true
+
+    - name: Populer quelques cles de demo dans etcd
+      command: >
+        docker exec etcd etcdctl
+        --endpoints=http://localhost:2379
+        put {{ item.key }} "{{ item.value }}"
+      loop:
+        - { key: "/devops/environment", value: "lab" }
+        - { key: "/devops/version", value: "1.0.0" }
+        - { key: "/devops/services/monitoring", value: "prometheus,grafana,alertmanager" }
+        - { key: "/devops/config/max_connections", value: "100" }
+      ignore_errors: true
+
+  post_tasks:
+    - name: Afficher le resume etcd
+      debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║       etcd deploye avec succes !                        ║
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  etcd Client  : http://localhost:{{ etcd_client_port }}               ║
+          ║  etcd Peer    : http://localhost:{{ etcd_peer_port }}               ║
+          ║  etcd Browser : http://localhost:{{ etcd_browser_port }}               ║
+          ║                                                          ║
+          ║  Commandes utiles :                                      ║
+          ║  docker exec etcd etcdctl get /devops/environment        ║
+          ║  docker exec etcd etcdctl put /ma/cle "valeur"           ║
+          ║  docker exec etcd etcdctl watch /devops/ --prefix        ║
+          ║  docker exec etcd etcdctl snapshot save /tmp/snap.db     ║
+          ╚═══════════════════════════════════════════════════════════╝

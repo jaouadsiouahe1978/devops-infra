@@ -1,0 +1,273 @@
+---
+# 11-install-elk.yaml — Installation de la stack ELK
+# Services : Elasticsearch, Kibana, Logstash
+# Usage: ansible-playbook -i inventory/hosts.ini playbooks/11-install-elk.yaml
+- name: "[11] Install ELK Stack — Elasticsearch, Kibana, Logstash"
+  hosts: all
+  become: false
+  gather_facts: true
+
+  vars:
+    infra_dir: "{{ ansible_env.HOME }}/devops-infra"
+    data_dir: "{{ infra_dir }}/data"
+    compose_dir: "{{ infra_dir }}/docker/compose"
+    config_dir: "{{ infra_dir }}/config/elk"
+
+    elk_version: "8.13.0"
+    elasticsearch_port: 9200
+    elasticsearch_transport_port: 9300
+    kibana_port: 5601
+    logstash_port: 5044
+    logstash_api_port: 9600
+
+    elk_password: "DevOps2024!ELK"
+    elk_network: "devops-elk"
+
+    es_data_dir: "{{ data_dir }}/elasticsearch"
+    kibana_data_dir: "{{ data_dir }}/kibana"
+    logstash_data_dir: "{{ data_dir }}/logstash"
+
+  pre_tasks:
+    - name: Verifier Docker
+      command: docker info
+      changed_when: false
+
+    - name: Verifier/Augmenter vm.max_map_count pour Elasticsearch
+      command: sysctl -n vm.max_map_count
+      register: max_map_count
+      changed_when: false
+      ignore_errors: true
+
+    - name: Augmenter vm.max_map_count si necessaire
+      command: sysctl -w vm.max_map_count=262144
+      when: max_map_count.stdout | int < 262144
+      ignore_errors: true
+
+    - name: Creer les repertoires
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0777"
+      loop:
+        - "{{ es_data_dir }}"
+        - "{{ kibana_data_dir }}"
+        - "{{ logstash_data_dir }}"
+        - "{{ config_dir }}/logstash/pipeline"
+        - "{{ config_dir }}/logstash/config"
+
+    - name: Creer la config Logstash
+      copy:
+        dest: "{{ config_dir }}/logstash/config/logstash.yml"
+        mode: "0644"
+        content: |
+          http.host: "0.0.0.0"
+          path.config: /usr/share/logstash/pipeline
+          xpack.monitoring.enabled: false
+
+    - name: Creer le pipeline Logstash
+      copy:
+        dest: "{{ config_dir }}/logstash/pipeline/main.conf"
+        mode: "0644"
+        content: |
+          input {
+            beats {
+              port => 5044
+            }
+            tcp {
+              port => 5001
+              codec => json_lines
+            }
+            syslog {
+              port => 5514
+              type => syslog
+            }
+          }
+
+          filter {
+            if [type] == "syslog" {
+              grok {
+                match => { "message" => "%{SYSLOGTIMESTAMP:syslog_timestamp} %{SYSLOGHOST:syslog_hostname} %{DATA:syslog_program}(?:\[%{POSINT:syslog_pid}\])?: %{GREEDYDATA:syslog_message}" }
+              }
+              date {
+                match => [ "syslog_timestamp", "MMM  d HH:mm:ss", "MMM dd HH:mm:ss" ]
+              }
+            }
+
+            if [fields][service] {
+              mutate {
+                add_tag => [ "%{[fields][service]}" ]
+              }
+            }
+
+            mutate {
+              add_field => { "environment" => "devops-lab" }
+            }
+          }
+
+          output {
+            elasticsearch {
+              hosts => ["elasticsearch:9200"]
+              index => "devops-logs-%{+YYYY.MM.dd}"
+              user => "elastic"
+              password => "${ELASTIC_PASSWORD}"
+            }
+            stdout {
+              codec => rubydebug { metadata => false }
+            }
+          }
+
+  tasks:
+    - name: Creer le reseau devops-elk
+      command: docker network create --driver bridge {{ elk_network }}
+      register: net
+      failed_when: net.rc != 0 and 'already exists' not in net.stderr
+      changed_when: net.rc == 0
+
+    - name: Deployer docker-compose ELK
+      copy:
+        dest: "{{ compose_dir }}/elk.yml"
+        mode: "0644"
+        content: |
+          name: devops-elk
+
+          networks:
+            {{ elk_network }}:
+              external: true
+              name: {{ elk_network }}
+
+          volumes:
+            es-data:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ es_data_dir }} }
+            kibana-data:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ kibana_data_dir }} }
+            logstash-data:
+              driver: local
+              driver_opts: { type: none, o: bind, device: {{ logstash_data_dir }} }
+
+          services:
+            elasticsearch:
+              image: docker.elastic.co/elasticsearch/elasticsearch:{{ elk_version }}
+              container_name: elasticsearch
+              restart: unless-stopped
+              ports:
+                - "{{ elasticsearch_port }}:9200"
+                - "{{ elasticsearch_transport_port }}:9300"
+              environment:
+                - discovery.type=single-node
+                - ELASTIC_PASSWORD={{ elk_password }}
+                - xpack.security.enabled=false
+                - xpack.security.http.ssl.enabled=false
+                - bootstrap.memory_lock=true
+                - ES_JAVA_OPTS=-Xms512m -Xmx1g
+                - logger.level=WARN
+              ulimits:
+                memlock:
+                  soft: -1
+                  hard: -1
+              volumes:
+                - es-data:/usr/share/elasticsearch/data
+              networks:
+                - {{ elk_network }}
+              mem_limit: 2g
+              cpus: 1.0
+              healthcheck:
+                test: ["CMD", "curl", "-sf", "http://localhost:9200/_cluster/health"]
+                interval: 30s
+                timeout: 15s
+                retries: 10
+                start_period: 60s
+              logging:
+                driver: json-file
+                options: { max-size: "10m", max-file: "3" }
+
+            kibana:
+              image: docker.elastic.co/kibana/kibana:{{ elk_version }}
+              container_name: kibana
+              restart: unless-stopped
+              depends_on:
+                elasticsearch:
+                  condition: service_healthy
+              ports:
+                - "{{ kibana_port }}:5601"
+              environment:
+                - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+                - ELASTICSEARCH_USERNAME=kibana_system
+                - ELASTICSEARCH_PASSWORD={{ elk_password }}
+                - XPACK_SECURITY_ENABLED=false
+                - SERVER_NAME=kibana.devops.local
+                - LOGGING_ROOT_LEVEL=warn
+              volumes:
+                - kibana-data:/usr/share/kibana/data
+              networks:
+                - {{ elk_network }}
+              mem_limit: 1g
+              healthcheck:
+                test: ["CMD", "curl", "-sf", "http://localhost:5601/api/status"]
+                interval: 30s
+                timeout: 15s
+                retries: 10
+                start_period: 90s
+              logging:
+                driver: json-file
+                options: { max-size: "10m", max-file: "3" }
+
+            logstash:
+              image: docker.elastic.co/logstash/logstash:{{ elk_version }}
+              container_name: logstash
+              restart: unless-stopped
+              depends_on:
+                elasticsearch:
+                  condition: service_healthy
+              ports:
+                - "{{ logstash_port }}:5044"
+                - "5001:5001"
+                - "5514:5514/udp"
+                - "{{ logstash_api_port }}:9600"
+              environment:
+                - ELASTIC_PASSWORD={{ elk_password }}
+                - LS_JAVA_OPTS=-Xms256m -Xmx512m
+              volumes:
+                - {{ config_dir }}/logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+                - {{ config_dir }}/logstash/pipeline:/usr/share/logstash/pipeline:ro
+                - logstash-data:/usr/share/logstash/data
+              networks:
+                - {{ elk_network }}
+              mem_limit: 1g
+              healthcheck:
+                test: ["CMD", "curl", "-sf", "http://localhost:9600/_node/stats"]
+                interval: 30s
+                timeout: 15s
+                retries: 10
+                start_period: 60s
+              logging:
+                driver: json-file
+                options: { max-size: "10m", max-file: "3" }
+
+    - name: Lancer la stack ELK
+      command: docker compose -f {{ compose_dir }}/elk.yml up -d --remove-orphans
+
+    - name: Attendre qu'Elasticsearch soit pret
+      uri:
+        url: "http://localhost:{{ elasticsearch_port }}/_cluster/health"
+        status_code: 200
+      register: es_check
+      until: es_check.status == 200
+      retries: 30
+      delay: 15
+      ignore_errors: true
+
+  post_tasks:
+    - name: Afficher le resume ELK
+      debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║       Stack ELK deployee avec succes !                  ║
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  Elasticsearch : http://localhost:{{ elasticsearch_port }}             ║
+          ║  Kibana        : http://localhost:{{ kibana_port }}             ║
+          ║  Logstash      : beats://localhost:{{ logstash_port }}           ║
+          ║                  API: http://localhost:{{ logstash_api_port }}         ║
+          ║  Password ELK  : {{ elk_password }}               ║
+          ╚═══════════════════════════════════════════════════════════╝

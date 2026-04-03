@@ -1,0 +1,342 @@
+---
+# 10-install-networking.yaml — Installation de la stack Networking / Reverse Proxy
+# Services : Traefik, HAProxy, Nginx
+# Usage: ansible-playbook -i inventory/hosts.ini playbooks/10-install-networking.yaml
+- name: "[10] Install Networking Stack — Traefik, HAProxy, Nginx"
+  hosts: all
+  become: false
+  gather_facts: true
+
+  vars:
+    infra_dir: "{{ ansible_env.HOME }}/devops-infra"
+    data_dir: "{{ infra_dir }}/data"
+    compose_dir: "{{ infra_dir }}/docker/compose"
+    config_dir: "{{ infra_dir }}/config/networking"
+
+    # Traefik
+    traefik_image: "traefik:v3.0"
+    traefik_port: 8080
+    traefik_https_port: 8443
+    traefik_dashboard_port: 8090
+
+    # HAProxy
+    haproxy_image: "haproxy:2.9-alpine"
+    haproxy_port: 9999
+    haproxy_stats_port: 9998
+
+    # Nginx
+    nginx_image: "nginx:1.25-alpine"
+    nginx_port: 8091
+    nginx_data_dir: "{{ data_dir }}/nginx"
+
+    networking_network: "devops-networking"
+
+  pre_tasks:
+    - name: Verifier Docker
+      command: docker info
+      changed_when: false
+
+    - name: Creer les repertoires
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ config_dir }}/traefik"
+        - "{{ config_dir }}/haproxy"
+        - "{{ config_dir }}/nginx"
+        - "{{ nginx_data_dir }}/html"
+        - "{{ data_dir }}/traefik"
+
+    - name: Creer la configuration Traefik statique
+      copy:
+        dest: "{{ config_dir }}/traefik/traefik.yml"
+        mode: "0644"
+        content: |
+          global:
+            checkNewVersion: false
+            sendAnonymousUsage: false
+
+          api:
+            dashboard: true
+            insecure: true
+
+          log:
+            level: INFO
+
+          accessLog:
+            filePath: /var/log/traefik/access.log
+            format: json
+
+          entryPoints:
+            web:
+              address: ":80"
+            websecure:
+              address: ":443"
+            traefik:
+              address: ":8080"
+
+          providers:
+            docker:
+              endpoint: unix:///var/run/docker.sock
+              exposedByDefault: false
+              network: devops-networking
+            file:
+              directory: /etc/traefik/dynamic
+              watch: true
+
+          metrics:
+            prometheus:
+              buckets:
+                - 0.1
+                - 0.3
+                - 1.2
+                - 5.0
+
+    - name: Creer la config dynamique Traefik
+      copy:
+        dest: "{{ config_dir }}/traefik/dynamic.yml"
+        mode: "0644"
+        content: |
+          http:
+            routers:
+              dashboard:
+                rule: "Host(`traefik.devops.local`)"
+                service: api@internal
+                entryPoints:
+                  - web
+
+          tcp: {}
+          udp: {}
+
+    - name: Creer la configuration HAProxy
+      copy:
+        dest: "{{ config_dir }}/haproxy/haproxy.cfg"
+        mode: "0644"
+        content: |
+          global
+            log stdout format raw local0 info
+            maxconn 50000
+            nbthread 2
+
+          defaults
+            log global
+            mode http
+            option httplog
+            option dontlognull
+            option redispatch
+            option forwardfor
+            timeout connect 5s
+            timeout client  30s
+            timeout server  30s
+            retries 3
+
+          frontend stats
+            bind *:9998
+            mode http
+            stats enable
+            stats uri /stats
+            stats refresh 10s
+            stats show-legends
+            stats show-node
+
+          frontend http_in
+            bind *:80
+            mode http
+            default_backend devops_services
+
+          backend devops_services
+            mode http
+            balance roundrobin
+            option httpchk GET /
+            server grafana grafana:3000 check
+            server prometheus prometheus:9090 check
+
+    - name: Creer la page d'accueil Nginx
+      copy:
+        dest: "{{ nginx_data_dir }}/html/index.html"
+        mode: "0644"
+        content: |
+          <!DOCTYPE html>
+          <html lang="fr">
+          <head>
+            <meta charset="UTF-8">
+            <title>DevOps Lab — Dashboard</title>
+            <style>
+              body { font-family: Arial, sans-serif; background: #1e1e2e; color: #cdd6f4; margin: 0; padding: 20px; }
+              h1 { color: #89b4fa; }
+              .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px; }
+              .card { background: #313244; border-radius: 8px; padding: 15px; }
+              .card a { color: #89dceb; text-decoration: none; font-weight: bold; }
+              .card a:hover { color: #cba6f7; }
+              .badge { font-size: 0.8em; color: #a6e3a1; }
+            </style>
+          </head>
+          <body>
+            <h1>DevOps Lab — Services Dashboard</h1>
+            <div class="grid">
+              <div class="card"><a href="http://localhost:3000" target="_blank">Grafana</a><br><span class="badge">:3000</span></div>
+              <div class="card"><a href="http://localhost:9090" target="_blank">Prometheus</a><br><span class="badge">:9090</span></div>
+              <div class="card"><a href="http://localhost:8081" target="_blank">Jenkins</a><br><span class="badge">:8081</span></div>
+              <div class="card"><a href="http://localhost:3001" target="_blank">Gitea</a><br><span class="badge">:3001</span></div>
+              <div class="card"><a href="http://localhost:8200" target="_blank">Vault</a><br><span class="badge">:8200</span></div>
+              <div class="card"><a href="http://localhost:8500" target="_blank">Consul</a><br><span class="badge">:8500</span></div>
+              <div class="card"><a href="http://localhost:5601" target="_blank">Kibana</a><br><span class="badge">:5601</span></div>
+              <div class="card"><a href="http://localhost:9001" target="_blank">MinIO</a><br><span class="badge">:9001</span></div>
+              <div class="card"><a href="http://localhost:8090" target="_blank">Traefik</a><br><span class="badge">:8090</span></div>
+              <div class="card"><a href="http://localhost:9998/stats" target="_blank">HAProxy Stats</a><br><span class="badge">:9998</span></div>
+            </div>
+          </body>
+          </html>
+
+    - name: Creer la config Nginx
+      copy:
+        dest: "{{ config_dir }}/nginx/nginx.conf"
+        mode: "0644"
+        content: |
+          worker_processes auto;
+          error_log /var/log/nginx/error.log warn;
+          pid /tmp/nginx.pid;
+
+          events {
+            worker_connections 1024;
+            use epoll;
+            multi_accept on;
+          }
+
+          http {
+            include /etc/nginx/mime.types;
+            default_type application/octet-stream;
+            sendfile on;
+            keepalive_timeout 65;
+            gzip on;
+            gzip_types text/plain text/css application/json;
+
+            log_format main '$remote_addr - $remote_user [$time_local] '
+              '"$request" $status $body_bytes_sent '
+              '"$http_referer" "$http_user_agent"';
+
+            access_log /var/log/nginx/access.log main;
+
+            server {
+              listen 80;
+              server_name localhost;
+              root /usr/share/nginx/html;
+              index index.html;
+
+              location /nginx_status {
+                stub_status on;
+                access_log off;
+              }
+
+              location / {
+                try_files $uri $uri/ =404;
+              }
+            }
+          }
+
+  tasks:
+    - name: Creer le reseau devops-networking
+      command: docker network create --driver bridge {{ networking_network }}
+      register: net
+      failed_when: net.rc != 0 and 'already exists' not in net.stderr
+      changed_when: net.rc == 0
+
+    - name: Deployer docker-compose Networking
+      copy:
+        dest: "{{ compose_dir }}/networking.yml"
+        mode: "0644"
+        content: |
+          name: devops-networking
+
+          networks:
+            {{ networking_network }}:
+              external: true
+              name: {{ networking_network }}
+
+          services:
+            traefik:
+              image: {{ traefik_image }}
+              container_name: traefik
+              restart: unless-stopped
+              ports:
+                - "{{ traefik_port }}:80"
+                - "{{ traefik_https_port }}:443"
+                - "{{ traefik_dashboard_port }}:8080"
+              command:
+                - --configFile=/etc/traefik/traefik.yml
+              volumes:
+                - /var/run/docker.sock:/var/run/docker.sock:ro
+                - {{ config_dir }}/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+                - {{ config_dir }}/traefik/dynamic.yml:/etc/traefik/dynamic/dynamic.yml:ro
+                - {{ data_dir }}/traefik:/var/log/traefik
+              networks:
+                - {{ networking_network }}
+              mem_limit: 256m
+              healthcheck:
+                test: ["CMD", "traefik", "healthcheck"]
+                interval: 30s
+                timeout: 10s
+                retries: 5
+              logging:
+                driver: json-file
+                options: { max-size: "10m", max-file: "3" }
+
+            haproxy:
+              image: {{ haproxy_image }}
+              container_name: haproxy
+              restart: unless-stopped
+              ports:
+                - "{{ haproxy_port }}:80"
+                - "{{ haproxy_stats_port }}:9998"
+              volumes:
+                - {{ config_dir }}/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+              networks:
+                - {{ networking_network }}
+              mem_limit: 128m
+              healthcheck:
+                test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+                interval: 30s
+                timeout: 10s
+                retries: 5
+              logging:
+                driver: json-file
+                options: { max-size: "10m", max-file: "3" }
+
+            nginx:
+              image: {{ nginx_image }}
+              container_name: nginx
+              restart: unless-stopped
+              ports:
+                - "{{ nginx_port }}:80"
+              volumes:
+                - {{ nginx_data_dir }}/html:/usr/share/nginx/html:ro
+                - {{ config_dir }}/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+              networks:
+                - {{ networking_network }}
+              mem_limit: 128m
+              healthcheck:
+                test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+                interval: 30s
+                timeout: 10s
+                retries: 5
+              logging:
+                driver: json-file
+                options: { max-size: "10m", max-file: "3" }
+
+    - name: Lancer la stack Networking
+      command: docker compose -f {{ compose_dir }}/networking.yml up -d --remove-orphans
+
+  post_tasks:
+    - name: Afficher le resume Networking
+      debug:
+        msg: |
+          ╔════════════════════════════════════════════════════════╗
+          ║     Stack Networking deployee avec succes !           ║
+          ╠════════════════════════════════════════════════════════╣
+          ║  Traefik Dashboard : http://localhost:{{ traefik_dashboard_port }}       ║
+          ║  Traefik HTTP      : http://localhost:{{ traefik_port }}             ║
+          ║  HAProxy HTTP      : http://localhost:{{ haproxy_port }}            ║
+          ║  HAProxy Stats     : http://localhost:{{ haproxy_stats_port }}/stats  ║
+          ║  Nginx             : http://localhost:{{ nginx_port }}             ║
+          ╚════════════════════════════════════════════════════════╝
