@@ -44,3 +44,13 @@ datasources:
     jsonData:
       implementation: prometheus
     editable: true
+
+  - name: cAdvisor
+    type: prometheus
+    access: proxy
+    url: http://cadvisor:8088
+    jsonData:
+      timeInterval: '15s'
+      queryTimeout: '60s'
+      httpMethod: POST
+    editable: true
