@@ -75,7 +75,7 @@ receivers:
       - url: 'http://localhost:5001/webhook/alerts'
         send_resolved: true
         http_config:
-          timeout: 10s
+          
 
   - name: 'critical-webhook'
     webhook_configs:
