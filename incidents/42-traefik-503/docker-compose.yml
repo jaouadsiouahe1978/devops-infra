@@ -1,0 +1,19 @@
+services:
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik-incident
+    ports:
+      - "8286:8086"
+      - "8290:8090"
+    volumes:
+      - ./traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./dynamic:/etc/traefik/dynamic:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - monitoring
+    restart: unless-stopped
+
+networks:
+  monitoring:
+    external: true
+    name: devops-monitoring

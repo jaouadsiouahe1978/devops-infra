@@ -1,0 +1,49 @@
+http:
+  routers:
+    grafana:
+      rule: "PathPrefix(`/grafana`)"
+      service: grafana
+      entryPoints:
+        - web
+      middlewares:
+        - strip-grafana
+
+    prometheus:
+      rule: "PathPrefix(`/prometheus`)"
+      service: prometheus
+      entryPoints:
+        - web
+
+    alertmanager:
+      rule: "PathPrefix(`/alertmanager`)"
+      service: alertmanager
+      entryPoints:
+        - web
+      middlewares:
+          - strip-alertmanager
+
+  services:
+    grafana:
+      loadBalancer:
+        servers:
+          - url: "http://grafana:3000"
+
+    prometheus:
+      loadBalancer:
+        servers:
+          - url: "http://prometheus:9090"
+
+    alertmanager:
+      loadBalancer:
+        servers:
+          - url: "http://alertmanager:9093"  # BUG INJECTÉ
+
+  middlewares:
+    strip-grafana:
+      stripPrefix:
+        prefixes:
+          - "/grafana"
+    strip-alertmanager:
+      stripPrefix:
+        prefixes:
+          - "/alertmanager"

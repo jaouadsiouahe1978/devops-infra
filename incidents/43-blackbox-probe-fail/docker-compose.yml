@@ -1,0 +1,16 @@
+services:
+  blackbox:
+    image: prom/blackbox-exporter:v0.24.0
+    container_name: blackbox-incident
+    ports:
+      - "9115:9115"
+    volumes:
+      - ./blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    networks:
+      - monitoring
+    restart: unless-stopped
+
+networks:
+  monitoring:
+    external: true
+    name: devops-monitoring
